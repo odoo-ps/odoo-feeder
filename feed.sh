@@ -82,6 +82,24 @@ else
 fi
 
 # --------------------------------------------------------------------------- #
+step "Checking Google sign-in"
+# --------------------------------------------------------------------------- #
+if [[ -n "${ANTIGRAVITY_TOKEN:-}" ]]; then
+    ok "Using ANTIGRAVITY_TOKEN (unattended)"
+elif [[ -s "$HOME/.gemini/oauth_creds.json" ]]; then
+    ok "Already signed in"
+elif [[ -t 0 ]]; then
+    warn "You are not signed in to the AI yet — let's do the one-time sign-in."
+    printf '%s' "    A browser will open. Sign in, paste the code back, then type '/quit'. Press Enter... "
+    read -r _
+    agy || true
+    [[ -s "$HOME/.gemini/oauth_creds.json" ]] || die "Still not signed in. Run 'agy' to sign in, then re-run."
+    ok "Signed in"
+else
+    die "Not signed in and no terminal to sign in on. Run 'agy' once to sign in, or set ANTIGRAVITY_TOKEN."
+fi
+
+# --------------------------------------------------------------------------- #
 step "Fetching the feeder and CRUD tool"
 # --------------------------------------------------------------------------- #
 mkdir -p "$BIN_DIR" "$DATA_DIR"

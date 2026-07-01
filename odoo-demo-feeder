@@ -144,6 +144,15 @@ command -v bwrap >/dev/null 2>&1 || die "bubblewrap (bwrap) is not installed. Ru
 command -v python3 >/dev/null 2>&1 || die "python3 is not installed. Run install.sh first."
 [[ -f "$CRUD_TOOL" ]] || die "CRUD tool not found at $CRUD_TOOL. Run install.sh first."
 
+# agy must already be signed in: its Google OAuth flow (browser + paste a code)
+# cannot run headless inside the sandbox, so an unauthenticated run would just
+# hang until the timeout. Fail fast with clear instructions instead.
+if [[ -z "${ANTIGRAVITY_TOKEN:-}" && ! -s "$HOME/.gemini/oauth_creds.json" ]]; then
+    die "agy is not signed in yet.
+   Run 'agy' once and sign in with your Google account, then re-run.
+   (For unattended / CI use, set the ANTIGRAVITY_TOKEN environment variable.)"
+fi
+
 print_logo
 
 # --------------------------------------------------------------------------- #
@@ -360,6 +369,7 @@ bwrap_args=(
     --setenv ODOO_SCOPE "$ODOO_SCOPE"
 )
 [[ -n "${ODOO_DB:-}" ]] && bwrap_args+=(--setenv ODOO_DB "$ODOO_DB")
+[[ -n "${ANTIGRAVITY_TOKEN:-}" ]] && bwrap_args+=(--setenv ANTIGRAVITY_TOKEN "$ANTIGRAVITY_TOKEN")
 
 if [[ "${MODE:-batch}" == "interactive" ]]; then
     exec bwrap "${bwrap_args[@]}" agy --sandbox --model "$AGY_MODEL" "$(cat "$HERE/request.txt")"
