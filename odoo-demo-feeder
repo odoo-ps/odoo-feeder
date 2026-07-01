@@ -1,0 +1,398 @@
+#!/usr/bin/env bash
+#
+# Odoo Demo Database Feeder
+# -------------------------
+# A friendly launcher that lets a (non-technical) sales person populate an Odoo
+# demo database with realistic data for a given industry / scope, driven by the
+# Antigravity AI agent (agy).
+#
+# By default the agent runs NON-INTERACTIVELY and inside an OS-level sandbox
+# (bubblewrap) so its only real capability is to call the CRUD tool against the
+# target database. Pass -i / --interactive to drive agy interactively instead.
+#
+set -euo pipefail
+
+# --------------------------------------------------------------------------- #
+# Configuration
+# --------------------------------------------------------------------------- #
+# Public GitHub repo (owner/repo) holding the demo skills, pulled via `npx skills`.
+# Leave empty to skip the remote skills refresh.
+SKILLS_REPO="odoo-ps/odoo-feeder"
+
+CRUD_TOOL="${CRUD_TOOL:-$HOME/.local/share/odoo-demo-feeder/odoo_crud.py}"
+AGY_MODEL="${AGY_MODEL:-gemini-3-pro}"
+
+INTERACTIVE=0
+GAVE_ARGS=0
+
+# Values may come from flags (below) or from environment variables of the same
+# name. Anything still empty after parsing is asked for interactively.
+ODOO_URL="${ODOO_URL:-}"
+ODOO_LOGIN="${ODOO_LOGIN:-}"
+ODOO_SECRET="${ODOO_SECRET:-}"
+ODOO_DB="${ODOO_DB:-}"
+ODOO_SCOPE="${ODOO_SCOPE:-}"
+COMPANY_NAME="${COMPANY_NAME:-}"
+COMPANY_SITE="${COMPANY_SITE:-}"
+
+# --------------------------------------------------------------------------- #
+# Colors (Odoo brand) — degrade gracefully when no TTY / NO_COLOR
+# --------------------------------------------------------------------------- #
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    PURPLE=$'\e[38;5;97m'   # ~ Odoo #714B67
+    TEAL=$'\e[38;5;37m'
+    BOLD=$'\e[1m'
+    DIM=$'\e[2m'
+    RED=$'\e[31m'
+    GREEN=$'\e[32m'
+    RESET=$'\e[0m'
+else
+    PURPLE=""; TEAL=""; BOLD=""; DIM=""; RED=""; GREEN=""; RESET=""
+fi
+
+info()  { printf '%s\n' "${TEAL}$*${RESET}"; }
+warn()  { printf '%s\n' "${RED}! $*${RESET}" >&2; }
+die()   { printf '%s\n' "${RED}✖ $*${RESET}" >&2; exit 1; }
+
+# Validate an Odoo URL: must be http(s), and never the public odoo.com site.
+# Returns non-zero (and warns) when the URL is not acceptable.
+check_url() {
+    local url="$1" host
+    if [[ ! "$url" =~ ^https?:// ]]; then
+        warn "The URL must start with http:// or https://"
+        return 1
+    fi
+    host="${url#*://}"; host="${host%%/*}"; host="${host%%:*}"
+    host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$host" == "odoo.com" || "$host" == "www.odoo.com" ]]; then
+        warn "For safety, the public odoo.com production site is blocked."
+        warn "Use a customer database (e.g. *.odoo.com) or a dedicated server."
+        return 1
+    fi
+    return 0
+}
+
+print_logo() {
+    printf '\n%s' "$PURPLE$BOLD"
+    cat <<'LOGO'
+   ██████      ██  ██████   ██████
+  ██    ██     ██ ██    ██ ██    ██
+  ██    ██ ██████ ██    ██ ██    ██
+  ██    ██ ██  ██ ██    ██ ██    ██
+   ██████  ██████  ██████   ██████
+LOGO
+    printf '%s\n' "$RESET"
+    printf '%s\n' "${PURPLE}${BOLD}   Demo Database Feeder${RESET}"
+    printf '%s\n\n' "${DIM}   Populate a demo database with realistic data, powered by AI.${RESET}"
+}
+
+usage() {
+    cat <<USAGE
+Usage: odoo-demo-feeder [options]
+
+Any value not passed as a flag (or set as an environment variable) is asked for
+interactively. Passing at least one value flag runs non-interactively (optional
+fields are simply skipped when omitted).
+
+Connection:
+  --url URL             Odoo URL (blocked: odoo.com / www.odoo.com)
+  --login USER          Login (email or user)          [ODOO_LOGIN]
+  --secret SECRET       API key or password            [ODOO_SECRET]
+  --db NAME             Database name (needed for localhost / self-hosted) [ODOO_DB]
+
+Content:
+  --scope TEXT          Industry / scope, e.g. "Bakery"  [ODOO_SCOPE]
+  --company NAME        Customer company to research     [COMPANY_NAME]
+  --website URL         Customer website to research     [COMPANY_SITE]
+
+Other:
+  -i, --interactive     Drive the AI agent interactively (advanced).
+  -h, --help            Show this help.
+
+Example:
+  odoo-demo-feeder --url http://localhost:8069 --login admin --secret admin \\
+    --db mydb --scope "Bakery" --company "Maison Rorive" \\
+    --website https://www.maisonrorive.be
+USAGE
+}
+
+# --------------------------------------------------------------------------- #
+# Argument parsing
+# --------------------------------------------------------------------------- #
+need_val() { [[ -n "${2:-}" ]] || die "Option $1 needs a value."; }
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --url)                 need_val "$1" "${2:-}"; ODOO_URL="$2";     GAVE_ARGS=1; shift 2 ;;
+        --login|--user)        need_val "$1" "${2:-}"; ODOO_LOGIN="$2";   GAVE_ARGS=1; shift 2 ;;
+        --secret|--key|--password) need_val "$1" "${2:-}"; ODOO_SECRET="$2"; GAVE_ARGS=1; shift 2 ;;
+        --db|--database)       need_val "$1" "${2:-}"; ODOO_DB="$2";      GAVE_ARGS=1; shift 2 ;;
+        --scope)               need_val "$1" "${2:-}"; ODOO_SCOPE="$2";   GAVE_ARGS=1; shift 2 ;;
+        --company)             need_val "$1" "${2:-}"; COMPANY_NAME="$2"; GAVE_ARGS=1; shift 2 ;;
+        --website)             need_val "$1" "${2:-}"; COMPANY_SITE="$2"; GAVE_ARGS=1; shift 2 ;;
+        -i|--interactive)      INTERACTIVE=1; shift ;;
+        -h|--help)             usage; exit 0 ;;
+        *) usage; die "Unknown option: $1" ;;
+    esac
+done
+
+# --------------------------------------------------------------------------- #
+# Pre-flight checks
+# --------------------------------------------------------------------------- #
+command -v agy   >/dev/null 2>&1 || die "agy (Antigravity CLI) is not installed. Run install.sh first."
+command -v bwrap >/dev/null 2>&1 || die "bubblewrap (bwrap) is not installed. Run install.sh first."
+command -v python3 >/dev/null 2>&1 || die "python3 is not installed. Run install.sh first."
+[[ -f "$CRUD_TOOL" ]] || die "CRUD tool not found at $CRUD_TOOL. Run install.sh first."
+
+print_logo
+
+# --------------------------------------------------------------------------- #
+# Step 1 — collect connection details
+# --------------------------------------------------------------------------- #
+info "Step 1/3 — Tell me about the database you want to fill."
+echo
+
+# URL — prompt (with a retry loop) only if not supplied; always validate.
+if [[ -z "$ODOO_URL" ]]; then
+    while :; do
+        read -r -p "  Odoo URL (e.g. https://mycompany.odoo.com): " ODOO_URL
+        ODOO_URL="${ODOO_URL%/}"
+        check_url "$ODOO_URL" && break
+        ODOO_URL=""
+    done
+else
+    ODOO_URL="${ODOO_URL%/}"
+    check_url "$ODOO_URL" || die "Refusing to use this URL."
+fi
+
+[[ -n "$ODOO_LOGIN" ]]  || read -r -p "  Login (email or user): " ODOO_LOGIN
+[[ -n "$ODOO_LOGIN" ]]  || die "A login is required."
+
+[[ -n "$ODOO_SECRET" ]] || { read -r -s -p "  API key or password: " ODOO_SECRET; echo; }
+[[ -n "$ODOO_SECRET" ]] || die "An API key or password is required."
+
+[[ -n "$ODOO_SCOPE" ]]  || read -r -p "  Scope / industry (e.g. Plumbing, Commerce, Restaurant): " ODOO_SCOPE
+[[ -n "$ODOO_SCOPE" ]]  || die "A scope is required."
+
+# Optional fields — only asked when running fully interactively (no flags given).
+# The database name matters for localhost / self-hosted (SaaS auto-detects it).
+# A company + website let the AI research real data via the 'odoo-demo-csv' skill.
+if [[ "$GAVE_ARGS" -eq 0 ]]; then
+    [[ -n "$ODOO_DB" ]]      || read -r -p "  Database name (optional, needed for localhost; Enter to auto-detect): " ODOO_DB
+    [[ -n "$COMPANY_NAME" ]] || read -r -p "  Customer company name (optional, Enter to skip): " COMPANY_NAME
+    [[ -n "$COMPANY_SITE" ]] || read -r -p "  Customer website to research (optional, e.g. https://acme.com): " COMPANY_SITE
+fi
+
+echo
+info "  → Target  : $ODOO_URL"
+[[ -n "$ODOO_DB" ]]      && info "  → Database: $ODOO_DB"
+info "  → Scope   : $ODOO_SCOPE"
+[[ -n "$COMPANY_NAME" ]] && info "  → Company : $COMPANY_NAME"
+[[ -n "$COMPANY_SITE" ]] && info "  → Website : $COMPANY_SITE"
+echo
+
+export ODOO_URL ODOO_LOGIN ODOO_SECRET ODOO_DB ODOO_SCOPE COMPANY_NAME COMPANY_SITE
+
+# --------------------------------------------------------------------------- #
+# Step 2 — make sure the skills are up to date
+# --------------------------------------------------------------------------- #
+info "Step 2/3 — Updating the AI skills..."
+
+# Refresh from the public repo, quietly (npx skills is very chatty), targeting
+# Antigravity only and copying files (symlinks would break inside the sandbox).
+if [[ -n "$SKILLS_REPO" ]] && command -v npx >/dev/null 2>&1; then
+    if npx -y skills add "$SKILLS_REPO" --global --agent antigravity --skill '*' --copy -y >/dev/null 2>&1; then
+        info "  ✔ Skills up to date ($SKILLS_REPO)"
+    else
+        warn "Could not refresh skills from $SKILLS_REPO — using the installed copy."
+    fi
+fi
+
+# --- Restrict the agent to ONLY the CRUD tool ------------------------------- #
+# Install a single-name wrapper so the permission rule matches it exactly (a
+# rule on 'python3' would auto-approve any Python). Then allow only that command
+# in agy's settings — plus web research and file access the skill needs. Every
+# other command falls outside the allowlist and is not auto-approved. bwrap
+# remains the hard OS backstop underneath.
+CRUD_WRAPPER="$HOME/.local/bin/odoo-crud"
+mkdir -p "$HOME/.local/bin"
+cat > "$CRUD_WRAPPER" <<CRUD
+#!/usr/bin/env bash
+exec python3 "$CRUD_TOOL" "\$@"
+CRUD
+chmod +x "$CRUD_WRAPPER"
+
+# Merge our allow-rules into agy's global settings (preserving anything already
+# there). Strict, non-regex matching (agy default) — 'command(odoo-crud)' matches
+# any 'odoo-crud <subcommand>' invocation.
+AGY_SETTINGS="$HOME/.gemini/antigravity-cli/settings.json"
+mkdir -p "$(dirname "$AGY_SETTINGS")"
+if python3 - "$AGY_SETTINGS" <<'PY'
+import json, sys
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        data = {}
+except Exception:
+    data = {}
+allow = data.setdefault("permissions", {}).setdefault("allow", [])
+for rule in ("command(odoo-crud)", "read_url(*)", "read_file(*)", "write_file(*)"):
+    if rule not in allow:
+        allow.append(rule)
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+PY
+then
+    info "  ✔ Agent restricted to the 'odoo-crud' tool"
+else
+    warn "Could not write agy permissions; the run may prompt for approvals."
+fi
+echo
+
+# --------------------------------------------------------------------------- #
+# Step 3 — run the AI agent
+# --------------------------------------------------------------------------- #
+info "Step 3/3 — Populating the database. This can take a few minutes..."
+echo
+
+# Describe the customer to research, if the sales person provided one.
+if [[ -n "$COMPANY_SITE" || -n "$COMPANY_NAME" ]]; then
+    TARGET_DESC="Build the data for this real company (research its website first):
+  Company: ${COMPANY_NAME:-(name not given)}
+  Website: ${COMPANY_SITE:-(website not given)}
+  Industry / scope: ${ODOO_SCOPE}"
+else
+    TARGET_DESC="No specific customer was given — generate coherent, generic demo
+data for the \"${ODOO_SCOPE}\" industry."
+fi
+
+REQUEST="You are populating an Odoo demo database for a sales demo.
+
+Follow the 'odoo-demo-csv' skill: research the target, generate Odoo-import-ready
+CSV files, and import them into the connected database.
+
+${TARGET_DESC}
+
+Use ONLY this tool for every database operation (it reads the credentials from
+environment variables, so never ask for them). Wherever the skill mentions
+CRUD_TOOL, run:
+
+    odoo-crud <command> [options]
+
+This is the ONLY shell command you are permitted to run — other commands are
+blocked. It can read and write files in the current directory and fetch web
+pages for research.
+
+Available commands: auth-check | search-read | create | write | unlink | call |
+models | fields | import-preview | import-csv. Each prints JSON
+{\"ok\": true|false, ...} so you can check results and recover from errors.
+
+Steps:
+1. Run auth-check first and stop with a clear message if it fails.
+2. Set the company's industry and install the matching apps where relevant
+   (use 'call' on ir.module.module / res.company as needed).
+3. Generate the CSV files defined by the skill, write each to a file in the
+   current directory, and import them in dependency order with 'import-csv'.
+4. If an import fails, use 'import-preview', 'fields' and 'models' to find out
+   why, fix the CSV, and retry.
+Finish by printing one line that starts with 'SUMMARY:' describing what you created."
+
+# Scratch directory (writable workspace for the agent + the prompt file).
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+# The prompt goes to a file (never the command line) so it survives quoting and
+# never lands in the process list. Credentials stay in the environment only.
+printf '%s\n' "$REQUEST" > "$WORK/request.txt"
+
+# agy needs a writable config/auth dir; make sure it exists so the bind succeeds.
+mkdir -p "$HOME/.gemini" "$HOME/.cache"
+
+# Make the skill visible to agy as a WORKSPACE skill (.agents/skills under the
+# working dir). This is the unambiguous location agy reads, regardless of which
+# global dir the skills CLI used. $WORK is the agent's --chdir root.
+mkdir -p "$WORK/.agents/skills"
+for src in "$HOME/.agents/skills" "$HOME/.gemini/antigravity/skills"; do
+    [[ -d "$src" ]] && cp -r "$src/." "$WORK/.agents/skills/" 2>/dev/null || true
+done
+
+# Generate a self-contained launcher inside the scratch dir. It runs agy inside a
+# bubblewrap jail: the whole system is read-only, only the scratch dir + agy's own
+# config/cache are writable, sensitive home dirs are masked, network is on, and
+# only the ODOO_* credentials are exposed. So the agent's only real capability is
+# to run the CRUD tool against the target database.
+#
+# The heredoc is quoted ('LAUNCH') so nothing expands now: ODOO_* / AGY_MODEL /
+# HOME are read from the environment at run time (inherited via `script`), keeping
+# secrets out of this file on disk.
+cat > "$WORK/launch.sh" <<'LAUNCH'
+#!/usr/bin/env bash
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+
+bwrap_args=(
+    --ro-bind / /
+    --dev /dev --proc /proc --tmpfs /tmp
+    --bind "$HERE" "$HERE"
+    --bind "$HOME/.gemini" "$HOME/.gemini"
+    --bind "$HOME/.cache" "$HOME/.cache"
+    --tmpfs "$HOME/.ssh"
+    --chdir "$HERE"
+    --share-net --unshare-pid --new-session --die-with-parent
+    --setenv HOME "$HOME"
+    --setenv PATH "$HOME/.local/bin:$PATH"
+    --setenv ODOO_URL "$ODOO_URL"
+    --setenv ODOO_LOGIN "$ODOO_LOGIN"
+    --setenv ODOO_SECRET "$ODOO_SECRET"
+    --setenv ODOO_SCOPE "$ODOO_SCOPE"
+)
+[[ -n "${ODOO_DB:-}" ]] && bwrap_args+=(--setenv ODOO_DB "$ODOO_DB")
+
+if [[ "${MODE:-batch}" == "interactive" ]]; then
+    exec bwrap "${bwrap_args[@]}" agy --sandbox --model "$AGY_MODEL" "$(cat "$HERE/request.txt")"
+else
+    exec bwrap "${bwrap_args[@]}" \
+        agy -p "$(cat "$HERE/request.txt")" --model "$AGY_MODEL"
+fi
+LAUNCH
+chmod +x "$WORK/launch.sh"
+export AGY_MODEL
+
+if [[ "$INTERACTIVE" -eq 1 ]]; then
+    # Interactive: the terminal is already a TTY, run the launcher directly.
+    MODE=interactive "$WORK/launch.sh"
+    exit $?
+fi
+
+# Non-interactive (default). agy's headless mode silently drops stdout under a
+# non-TTY, so we attach the launcher to a pseudo-TTY, then strip ANSI escapes from
+# the captured output. Prefer util-linux `script`; fall back to a tiny Python pty
+# wrapper so no extra system package is required (python3 is already a dependency).
+pty_run() {
+    if command -v script >/dev/null 2>&1; then
+        script -qec "$1" /dev/null
+    else
+        python3 - "$1" <<'PY'
+import os, pty, sys
+os._exit(os.waitstatus_to_exitcode(pty.spawn([sys.argv[1]])))
+PY
+    fi
+}
+
+LOG="$WORK/agy-output.log"
+set +e
+pty_run "$WORK/launch.sh" \
+    | sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g' | tr -d '\r' | tee "$LOG"
+status=${PIPESTATUS[0]}
+set -e
+
+echo
+if grep -q '^SUMMARY:' "$LOG" 2>/dev/null; then
+    printf '%s\n' "${GREEN}✔ Done!${RESET}"
+    grep '^SUMMARY:' "$LOG" | sed "s/^/  ${GREEN}/; s/\$/${RESET}/"
+elif [[ "$status" -ne 0 ]]; then
+    die "The AI agent exited with an error (code $status). See the output above."
+else
+    warn "The agent finished but produced no SUMMARY line — please review the output above."
+fi
