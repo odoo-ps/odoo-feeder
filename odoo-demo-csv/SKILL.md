@@ -22,14 +22,34 @@ additional files).
 
 ## How to run in this environment (important)
 
-You are running **headless** with a CRUD tool (its exact path is given in the task
-prompt as `CRUD_TOOL`). Do **not** just print CSV code blocks. For each file:
+You run **headless** with a single tool, `odoo-crud` (the only shell command you
+may run). Do **not** just print CSV code blocks — write files and import them.
 
-1. Write the CSV to a file in the current working directory (e.g. `res_partner.csv`).
-2. Import it with:
-   `python3 <CRUD_TOOL> import-csv <model> --file <path>`
-3. If the import reports errors, diagnose with `import-preview <model> --file <path>`,
-   `fields <model>` and `models`, fix the CSV, and retry.
+**Be verbose.** Before each step, say what you are about to do; after each
+`odoo-crud` call, print a one-line result (e.g. "Installing crm… done", "Imported
+5 partners", "Preview found 1 bad column, fixing"). The sales person is watching
+this output, so narrate your progress.
+
+Work in this order:
+
+1. **Inspect the database first — never assume a model or app is available.**
+   - Check the modules you will need are installed:
+     `odoo-crud search-read ir.module.module --domain '[["name","in",["contacts","product","stock","crm","sale_management","account"]]]' --fields '["name","state"]'`
+   - **Install any missing module before importing to its models** (crm → crm.lead,
+     stock → stock.quant, product/sale → product.template). Find the id and install:
+     `odoo-crud call ir.module.module button_immediate_install --args '[[<module_id>]]'`
+     then re-check its state is `installed`.
+   - Confirm each target model and its fields exist, and adapt your CSV columns to
+     what this database/version actually has:
+     `odoo-crud models --filter crm` and `odoo-crud fields crm.lead`.
+2. **Configure the company** from your research: set the country and currency on
+   `res.company` to match the company's real location (find the id with
+   `search-read`, then `call res.company write`).
+3. **Generate & import** each CSV: write it to a file (e.g. `res_partner.csv`),
+   then `odoo-crud import-csv <model> --file <path>`.
+4. If an import reports errors, diagnose with
+   `odoo-crud import-preview <model> --file <path>`, `odoo-crud fields <model>` and
+   `odoo-crud models`, fix the CSV, and retry.
 
 Import in **dependency order** — partners → products → stock → leads — because of
 the ID references below.

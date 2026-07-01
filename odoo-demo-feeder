@@ -288,10 +288,16 @@ Available commands: auth-check | search-read | create | write | unlink | call |
 models | fields | import-preview | import-csv. Each prints JSON
 {\"ok\": true|false, ...} so you can check results and recover from errors.
 
+Be verbose: announce each step before doing it and print a one-line result after
+each command, so the person watching sees clear progress.
+
 Steps:
 1. Run auth-check first and stop with a clear message if it fails.
-2. Set the company's industry and install the matching apps where relevant
-   (use 'call' on ir.module.module / res.company as needed).
+2. Inspect the database (search-read on ir.module.module, 'models', 'fields') and
+   install any module you need before importing to its models (crm for crm.lead,
+   stock for stock.quant, product/sale for product.template) via
+   'call ir.module.module button_immediate_install'. Configure the company's
+   country/currency from your research.
 3. Generate the CSV files defined by the skill, write each to a file in the
    current directory, and import them in dependency order with 'import-csv'.
 4. If an import fails, use 'import-preview', 'fields' and 'models' to find out
