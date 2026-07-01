@@ -24,6 +24,7 @@ AGY_MODEL="${AGY_MODEL:-gemini-3-pro}"
 AGY_TIMEOUT="${AGY_TIMEOUT:-20m}"   # headless print-mode budget (research+install+imports)
 
 INTERACTIVE=0
+PLAN=0
 GAVE_ARGS=0
 
 # Values may come from flags (below) or from environment variables of the same
@@ -113,6 +114,8 @@ Content:
 
 Other:
   -i, --interactive     Drive the AI agent interactively (advanced).
+      --plan            Review a plan and approve it before any change is made
+                        (implies interactive).
   -h, --help            Show this help.
 
 Example:
@@ -138,6 +141,7 @@ while [[ $# -gt 0 ]]; do
         --website)             need_val "$1" "${2:-}"; COMPANY_SITE="$2"; GAVE_ARGS=1; shift 2 ;;
         --notes|--extra)       need_val "$1" "${2:-}"; EXTRA="$2";        GAVE_ARGS=1; shift 2 ;;
         -i|--interactive)      INTERACTIVE=1; shift ;;
+        --plan)                PLAN=1; INTERACTIVE=1; shift ;;
         -h|--help)             usage; exit 0 ;;
         *) usage; die "Unknown option: $1" ;;
     esac
@@ -306,8 +310,9 @@ REQUEST="You are populating an Odoo demo database for a sales demo.
 Follow the 'odoo-demo-csv' skill: research the target, generate Odoo-import-ready
 CSV files, and import them into the connected database.
 
-Target dataset size: ${ODOO_SIZE}. Use the record counts for this size from the
-skill's 'Dataset size' table — do not guess the volume.
+Target dataset size: ${ODOO_SIZE}. Apply this size consistently to EVERY model you
+populate, using the anchor + ratios in the skill's 'Dataset size' section — do not
+guess the volume, and don't leave some models tiny while others are large.
 
 ${TARGET_DESC}
 
@@ -351,6 +356,16 @@ if [[ -n "$EXTRA" ]]; then
 
 Additional instructions from the sales person (follow these too when reasonable):
 ${EXTRA}"
+fi
+
+# Plan mode: make the agent lay out a plan and wait for approval before acting.
+if [[ "$PLAN" -eq 1 ]]; then
+    REQUEST="FIRST, present a short PLAN and WAIT for my approval before you change
+anything. The plan must list: the modules you will install, the record counts per
+model for the '${ODOO_SIZE}' size, and the files you will create. Do NOT run any
+create/import/install until I reply to approve.
+
+${REQUEST}"
 fi
 
 # Scratch directory (writable workspace for the agent + the prompt file).

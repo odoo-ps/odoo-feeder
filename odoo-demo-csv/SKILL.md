@@ -62,34 +62,46 @@ the ID references below.
 
 ## Dataset size (how many records)
 
-The task prompt gives a size — **small**, **medium**, or **big**. Use the matching
-row as your **target record counts** (don't improvise the volume):
+The prompt gives a size — **small**, **medium**, or **big**. Treat it as the
+**overall scale of the business** and apply it **consistently to every model you
+populate** (partners, products, stock, leads, and anything else you add such as
+sale.order, account.move or mrp.bom) using realistic ratios. Don't size one model
+richly and leave the others almost empty.
 
-| size   | customers | vendors | products | leads |
-|--------|-----------|---------|----------|-------|
-| small  | 5         | 2       | 5        | 3     |
-| medium | 12        | 4       | 12       | 8     |
-| big    | 30        | 8       | 30       | 20    |
+Anchor on the number of **customers**, then derive everything else in proportion:
 
-If the real website has fewer genuine products than the target, stay truthful:
-use the real ones and reach the target with plausible **variants** of them (sizes,
-flavours, formats) — never invent unrelated products. Customers, vendors and leads
-can be plausible demo records for the company's region/sector. `stock.quant` lines
-follow the number of storable products.
+| size   | customers (anchor) | feel                                 |
+|--------|--------------------|--------------------------------------|
+| small  | ~8                 | a small shop — just enough to demo   |
+| medium | ~25                | an established SMB                    |
+| big    | ~80                | a large company, rich data           |
+
+Derive the rest from that anchor with sensible, sector-adjusted ratios, e.g.:
+- **vendors** ≈ customers ÷ 6 (always just a handful).
+- **products** ≈ a catalogue smaller than the customer base (fewer for a services
+  business). If the site has fewer genuine products than that, stay truthful: use
+  the real ones and reach the number with real **variants** (sizes, flavours,
+  formats) — never invent unrelated products.
+- **stock.quant** — one line per storable (`detailed_type = product`) product.
+- **leads** ≈ half to one× the number of customers.
+- **any other model you create** (sale orders, invoices, BoMs…) — scale to match
+  and keep every reference valid via external IDs.
+
+Keep the whole dataset internally consistent and proportional to the chosen size.
 
 ## Files to generate (default set)
 
-1. **res.partner** — customers + vendors per the size table.
+1. **res.partner** — customers + vendors scaled per the size section.
    Columns: `id` (e.g. `partner_client_1`), `name`, `is_company`, `street`,
    `city`, `email`, `phone`.
-2. **product.template** — real flagship products found on the site, up to the size
-   target (see variant rule above).
+2. **product.template** — real flagship products found on the site, scaled per the
+   size section (see variant rule above).
    Columns: `id` (e.g. `product_1`), `name`, `list_price`, `standard_price`,
    `detailed_type` (`consu`, `product`, or `service`), `barcode`.
 3. **stock.quant** — stock lines, only for items where `detailed_type = product`.
    Columns: `product_id/id` (must reuse the exact id from the product file, e.g.
    `product_1`), `inventory_quantity`, `location_id` (value: `WH/Stock`).
-4. **crm.lead** — leads per the size table.
+4. **crm.lead** — leads scaled per the size section.
    Columns: `id` (e.g. `lead_1`), `name`, `partner_id/id` (reuse an id from file 1),
    `expected_revenue`, `stage_id` (value: `New`, `Qualified`, or `Proposition`).
 
