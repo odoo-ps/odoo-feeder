@@ -35,6 +35,7 @@ ODOO_DB="${ODOO_DB:-}"
 ODOO_SCOPE="${ODOO_SCOPE:-}"
 COMPANY_NAME="${COMPANY_NAME:-}"
 COMPANY_SITE="${COMPANY_SITE:-}"
+EXTRA="${EXTRA:-}"
 
 # --------------------------------------------------------------------------- #
 # Colors (Odoo brand) — degrade gracefully when no TTY / NO_COLOR
@@ -105,6 +106,8 @@ Content:
   --scope TEXT          Industry / scope, e.g. "Bakery"  [ODOO_SCOPE]
   --company NAME        Customer company to research     [COMPANY_NAME]
   --website URL         Customer website to research     [COMPANY_SITE]
+  --notes TEXT          Extra free-text instructions for the AI  [EXTRA]
+                        e.g. "also create 5 sales orders and a few invoices"
 
 Other:
   -i, --interactive     Drive the AI agent interactively (advanced).
@@ -130,6 +133,7 @@ while [[ $# -gt 0 ]]; do
         --scope)               need_val "$1" "${2:-}"; ODOO_SCOPE="$2";   GAVE_ARGS=1; shift 2 ;;
         --company)             need_val "$1" "${2:-}"; COMPANY_NAME="$2"; GAVE_ARGS=1; shift 2 ;;
         --website)             need_val "$1" "${2:-}"; COMPANY_SITE="$2"; GAVE_ARGS=1; shift 2 ;;
+        --notes|--extra)       need_val "$1" "${2:-}"; EXTRA="$2";        GAVE_ARGS=1; shift 2 ;;
         -i|--interactive)      INTERACTIVE=1; shift ;;
         -h|--help)             usage; exit 0 ;;
         *) usage; die "Unknown option: $1" ;;
@@ -190,6 +194,13 @@ if [[ "$GAVE_ARGS" -eq 0 ]]; then
     [[ -n "$ODOO_DB" ]]      || read -r -p "  Database name (optional, needed for localhost; Enter to auto-detect): " ODOO_DB
     [[ -n "$COMPANY_NAME" ]] || read -r -p "  Customer company name (optional, Enter to skip): " COMPANY_NAME
     [[ -n "$COMPANY_SITE" ]] || read -r -p "  Customer website to research (optional, e.g. https://acme.com): " COMPANY_SITE
+    if [[ -z "$EXTRA" ]]; then
+        echo "  Anything else the AI should do? (optional — type one or more lines,"
+        echo "  e.g. 'also create 5 sales orders'; press Enter on an empty line to finish)"
+        while IFS= read -r -p "  > " _line && [[ -n "$_line" ]]; do
+            EXTRA+="$_line"$'\n'
+        done
+    fi
 fi
 
 echo
@@ -198,6 +209,7 @@ info "  → Target  : $ODOO_URL"
 info "  → Scope   : $ODOO_SCOPE"
 [[ -n "$COMPANY_NAME" ]] && info "  → Company : $COMPANY_NAME"
 [[ -n "$COMPANY_SITE" ]] && info "  → Website : $COMPANY_SITE"
+[[ -n "$EXTRA" ]]        && info "  → Notes   : $(printf '%s' "$EXTRA" | tr '\n' ' ')"
 echo
 
 export ODOO_URL ODOO_LOGIN ODOO_SECRET ODOO_DB ODOO_SCOPE COMPANY_NAME COMPANY_SITE
@@ -318,6 +330,14 @@ Steps:
    why, fix the CSV, and retry.
 Finish by printing one line that starts with 'SUMMARY:' describing what you created."
 
+# Append any extra free-text instructions from the sales person.
+if [[ -n "$EXTRA" ]]; then
+    REQUEST+="
+
+Additional instructions from the sales person (follow these too when reasonable):
+${EXTRA}"
+fi
+
 # Scratch directory (writable workspace for the agent + the prompt file).
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -404,7 +424,7 @@ PY
 LOG="$WORK/agy-output.log"
 set +e
 pty_run "$WORK/launch.sh" \
-    | sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g' | tr -d '\r' | tee "$LOG"
+    | sed -u -r 's/\x1B\[[0-9;]*[A-Za-z]//g' | tr -d '\r' | tee "$LOG"
 status=${PIPESTATUS[0]}
 set -e
 
