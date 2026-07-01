@@ -60,18 +60,36 @@ Work in this order:
 Import in **dependency order** — partners → products → stock → leads — because of
 the ID references below.
 
+## Dataset size (how many records)
+
+The task prompt gives a size — **small**, **medium**, or **big**. Use the matching
+row as your **target record counts** (don't improvise the volume):
+
+| size   | customers | vendors | products | leads |
+|--------|-----------|---------|----------|-------|
+| small  | 5         | 2       | 5        | 3     |
+| medium | 12        | 4       | 12       | 8     |
+| big    | 30        | 8       | 30       | 20    |
+
+If the real website has fewer genuine products than the target, stay truthful:
+use the real ones and reach the target with plausible **variants** of them (sizes,
+flavours, formats) — never invent unrelated products. Customers, vendors and leads
+can be plausible demo records for the company's region/sector. `stock.quant` lines
+follow the number of storable products.
+
 ## Files to generate (default set)
 
-1. **res.partner** — 5 customers + 2 vendors.
+1. **res.partner** — customers + vendors per the size table.
    Columns: `id` (e.g. `partner_client_1`), `name`, `is_company`, `street`,
    `city`, `email`, `phone`.
-2. **product.template** — 5–7 real flagship products found on the site.
+2. **product.template** — real flagship products found on the site, up to the size
+   target (see variant rule above).
    Columns: `id` (e.g. `product_1`), `name`, `list_price`, `standard_price`,
    `detailed_type` (`consu`, `product`, or `service`), `barcode`.
 3. **stock.quant** — stock lines, only for items where `detailed_type = product`.
    Columns: `product_id/id` (must reuse the exact id from the product file, e.g.
    `product_1`), `inventory_quantity`, `location_id` (value: `WH/Stock`).
-4. **crm.lead** — 3 leads.
+4. **crm.lead** — leads per the size table.
    Columns: `id` (e.g. `lead_1`), `name`, `partner_id/id` (reuse an id from file 1),
    `expected_revenue`, `stage_id` (value: `New`, `Qualified`, or `Proposition`).
 
