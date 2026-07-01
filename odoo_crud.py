@@ -250,68 +250,62 @@ def _read_csv(path):
     return headers, body
 
 
-def _create_import(model, headers, body):
-    """Create a base_import.import record and return (import_id, fields)."""
-    import_id = execute(
-        "base_import.import", "create", [{"res_model": model}]
-    )
-    return import_id, headers, body
-
-
-def _import_options():
-    return {
-        "headers": True,
-        "quoting": '"',
-        "separator": ",",
-        "date_format": "%Y-%m-%d",
-        "datetime_format": "%Y-%m-%d %H:%M:%S",
-        "float_thousand_separator": ",",
-        "float_decimal_separator": ".",
-        "encoding": "utf-8",
-    }
+def _field_base(header):
+    """The model field a CSV header maps to, e.g. 'partner_id/id' -> 'partner_id'."""
+    base = header.split("/", 1)[0]
+    if base.endswith(".id"):
+        base = base[:-3]
+    return base
 
 
 def cmd_import_preview(args):
-    headers, _body = _read_csv(args.file)
-    import_id, headers, _body = _create_import(args.model, headers, _body)
-    preview = execute(
-        "base_import.import",
-        "parse_preview",
-        [import_id, _import_options()],
+    """Introspection-only preview: match CSV headers against the model's fields.
+
+    Does NOT touch base_import (its controller is unreliable over RPC on recent
+    Odoo). It reports which columns map to real fields, which don't, and a sample,
+    so the agent can see why an import would fail before running it.
+    """
+    headers, body = _read_csv(args.file)
+    meta = execute(
+        args.model, "fields_get", [],
+        {"attributes": ["string", "type", "relation", "required"]},
     )
-    ok({"import_id": import_id, "csv_headers": headers, "preview": preview})
+    columns = []
+    for header in headers:
+        base = _field_base(header)
+        exists = base == "id" or base in meta
+        columns.append({
+            "header": header,
+            "field": base,
+            "exists": exists,
+            "type": meta.get(base, {}).get("type"),
+        })
+    unknown = [c["header"] for c in columns if not c["exists"]]
+    ok({
+        "model": args.model,
+        "rows": len(body),
+        "columns": columns,
+        "unknown_columns": unknown,
+        "sample_rows": body[:3],
+    })
 
 
 def cmd_import_csv(args):
+    """Import a CSV via the model's low-level load() — handles external IDs and
+    the 'field/id' relational syntax, and reports per-row error messages."""
     headers, body = _read_csv(args.file)
-    import_id, headers, body = _create_import(args.model, headers, body)
-    preview = execute(
-        "base_import.import", "parse_preview", [import_id, _import_options()]
-    )
-    if isinstance(preview, dict) and preview.get("error"):
-        fail(f"Import preview failed: {preview['error']}")
+    fields = parse_json(args.fields, "--fields") or headers
+    result = execute(args.model, "load", [fields, body])
 
-    # Map each CSV column to a field. The agent should pass --fields to override
-    # auto-matching; otherwise we fall back to parse_preview's matches.
-    fields = parse_json(args.fields, "--fields")
-    if not fields:
-        matches = preview.get("matches", {}) if isinstance(preview, dict) else {}
-        fields = []
-        for index in range(len(headers)):
-            match = matches.get(str(index)) or matches.get(index)
-            fields.append(match[0] if match else False)
-
-    result = execute(
-        "base_import.import",
-        "execute_import",
-        [import_id, fields, headers, _import_options()],
-    )
-    messages = result.get("messages", []) if isinstance(result, dict) else result
+    # load() returns {'ids': [...] or False, 'messages': [...]}. A non-empty
+    # 'messages' list means at least one row failed (the load is rolled back).
+    messages = result.get("messages", []) if isinstance(result, dict) else []
+    ids = result.get("ids") if isinstance(result, dict) else result
     if messages:
-        ok({"status": "completed_with_messages", "messages": messages,
-            "fields_used": fields})
-    ok({"status": "imported", "ids": result.get("ids") if isinstance(result, dict)
-        else result, "fields_used": fields})
+        ok({"status": "failed", "messages": messages,
+            "imported": 0, "fields_used": fields})
+    ok({"status": "imported", "imported": len(ids or []),
+        "ids": ids, "fields_used": fields})
 
 
 def build_parser():
