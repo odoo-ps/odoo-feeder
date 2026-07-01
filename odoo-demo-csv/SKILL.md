@@ -108,6 +108,19 @@ Keep the whole dataset internally consistent and proportional to the chosen size
 If the sales person asks for extra files (`mrp.bom`, employees, chart of accounts,
 etc.), generate them too, keeping the same relational logic.
 
+## Images (optional, nice to have)
+
+Use **real** images you find while researching the site — never generate images.
+While reading the website, collect the URLs of the company logo and of product
+photos. After a record is created, set its picture with:
+
+`odoo-crud set-image <model> --id <record_id> --url <image_url>`
+
+(it downloads the image and writes it to `image_1920`). Good uses: the company
+logo on `res.company`, and each product's real photo on its `product.template`.
+Skip any record where you have no genuine image — do not invent one. Set images
+only after the records exist so you have their ids.
+
 ## Strict formatting & content rules
 
 - **ZERO HALLUCINATION** — use only real product/service names found on the site.

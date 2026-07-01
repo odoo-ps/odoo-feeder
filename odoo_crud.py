@@ -196,6 +196,42 @@ def cmd_install_modules(args):
     })
 
 
+def cmd_set_image(args):
+    """Download an image (or read a local file) and set it on a record.
+
+    Uses real images (e.g. product photos / the company logo found while
+    researching the site) — no image generation, so no image-model quota.
+    """
+    field = args.field or "image_1920"
+    if args.url:
+        import urllib.request
+        try:
+            req = urllib.request.Request(
+                args.url, headers={"User-Agent": "odoo-demo-feeder"}
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read()
+        except Exception as exc:  # noqa: BLE001
+            fail(f"Could not download image from {args.url}: {exc}")
+    elif args.file:
+        try:
+            with open(args.file, "rb") as handle:
+                raw = handle.read()
+        except OSError as exc:
+            fail(f"Cannot read image file '{args.file}': {exc}")
+    else:
+        fail("Provide --url or --file.")
+
+    if len(raw) > 10 * 1024 * 1024:
+        fail("Image is larger than 10 MB — pick a smaller one.")
+
+    import base64
+    encoded = base64.b64encode(raw).decode("ascii")
+    result = execute(args.model, "write", [[args.id], {field: encoded}])
+    ok({"model": args.model, "id": args.id, "field": field,
+        "bytes": len(raw), "written": result})
+
+
 def _read_csv(path):
     try:
         with open(path, "r", encoding="utf-8-sig", newline="") as handle:
@@ -324,6 +360,13 @@ def build_parser():
     )
     p.add_argument("modules", nargs="+", help="Technical module names, e.g. crm stock.")
 
+    p = sub.add_parser("set-image", help="Set a record image from a URL or file.")
+    p.add_argument("model")
+    p.add_argument("--id", type=int, required=True, help="Record id.")
+    p.add_argument("--url", help="Image URL to download.")
+    p.add_argument("--file", help="Local image file.")
+    p.add_argument("--field", help="Image field (default image_1920).")
+
     p = sub.add_parser(
         "import-preview",
         help="Preview a CSV import without committing (introspection/debug).",
@@ -349,6 +392,7 @@ HANDLERS = {
     "models": cmd_models,
     "fields": cmd_fields,
     "install-modules": cmd_install_modules,
+    "set-image": cmd_set_image,
     "import-preview": cmd_import_preview,
     "import-csv": cmd_import_csv,
 }
