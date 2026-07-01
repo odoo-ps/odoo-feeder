@@ -301,17 +301,16 @@ models | fields | import-preview | import-csv. Each prints JSON
 Be verbose: announce each step before doing it and print a one-line result after
 each command, so the person watching sees clear progress.
 
-Every command is synchronous — never wait or pause for an operation to finish
-(module installs complete before the call returns). Work in one continuous pass
-and only stop after you print the SUMMARY line. Install all needed modules in a
-single button_immediate_install call rather than one at a time.
+Every command is synchronous — never wait or pause for an operation to finish.
+To install modules, use ONE call: 'odoo-crud install-modules <names...>' — it
+installs AND confirms the modules before returning, so there is nothing to wait
+for. Work in one continuous pass and only stop after you print the SUMMARY line.
 
 Steps:
 1. Run auth-check first and stop with a clear message if it fails.
-2. Inspect the database (search-read on ir.module.module, 'models', 'fields') and
-   install any module you need before importing to its models (crm for crm.lead,
-   stock for stock.quant, product/sale for product.template) via
-   'call ir.module.module button_immediate_install'. Configure the company's
+2. Inspect the database ('models', 'fields'), then install every module you need
+   in ONE call: 'install-modules crm stock sale_management account' (it installs
+   and confirms before returning — do not wait). Configure the company's
    country/currency from your research.
 3. Generate the CSV files defined by the skill, write each to a file in the
    current directory, and import them in dependency order with 'import-csv'.

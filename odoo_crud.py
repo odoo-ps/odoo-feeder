@@ -160,6 +160,42 @@ def cmd_fields(args):
     ok(execute(args.model, "fields_get", [], {"attributes": attrs}))
 
 
+def cmd_install_modules(args):
+    """Install modules by technical name and confirm — a single blocking call.
+
+    button_immediate_install is synchronous server-side: when it returns, the
+    modules are installed and the registry reloaded. We then re-query the states
+    on a fresh connection (each execute() re-authenticates) so the caller gets a
+    definitive result and never needs to 'wait'.
+    """
+    names = args.modules
+    recs = execute(
+        "ir.module.module", "search_read",
+        [[["name", "in", names]]], {"fields": ["name", "state"]},
+    )
+    found = {r["name"] for r in recs}
+    missing = [n for n in names if n not in found]
+    to_install = [r["id"] for r in recs if r.get("state") == "uninstalled"]
+
+    if to_install:
+        execute("ir.module.module", "button_immediate_install", [to_install])
+
+    # Fresh connection (registry has reloaded) to report the final states.
+    final = execute(
+        "ir.module.module", "search_read",
+        [[["name", "in", names]]], {"fields": ["name", "state"]},
+    )
+    states = {r["name"]: r["state"] for r in final}
+    not_installed = [n for n, s in states.items() if s != "installed"]
+    ok({
+        "requested": names,
+        "missing": missing,
+        "installed_now": [r for r in states if states[r] == "installed"],
+        "not_installed": not_installed,
+        "states": states,
+    })
+
+
 def _read_csv(path):
     try:
         with open(path, "r", encoding="utf-8-sig", newline="") as handle:
@@ -283,6 +319,12 @@ def build_parser():
     p.add_argument("model")
 
     p = sub.add_parser(
+        "install-modules",
+        help="Install modules by name and confirm, in one blocking call.",
+    )
+    p.add_argument("modules", nargs="+", help="Technical module names, e.g. crm stock.")
+
+    p = sub.add_parser(
         "import-preview",
         help="Preview a CSV import without committing (introspection/debug).",
     )
@@ -306,6 +348,7 @@ HANDLERS = {
     "call": cmd_call,
     "models": cmd_models,
     "fields": cmd_fields,
+    "install-modules": cmd_install_modules,
     "import-preview": cmd_import_preview,
     "import-csv": cmd_import_csv,
 }

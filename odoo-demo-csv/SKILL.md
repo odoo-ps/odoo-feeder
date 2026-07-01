@@ -39,13 +39,12 @@ Work in this order:
 1. **Inspect the database first — never assume a model or app is available.**
    - Check the modules you will need are installed:
      `odoo-crud search-read ir.module.module --domain '[["name","in",["contacts","product","stock","crm","sale_management","account"]]]' --fields '["name","state"]'`
-   - **Install ALL the missing modules you need in ONE call** before importing
-     (crm → crm.lead, stock → stock.quant, product/sale → product.template).
-     Collect their ids and install them together:
-     `odoo-crud call ir.module.module button_immediate_install --args '[[id1, id2, ...]]'`
-     This call is **synchronous** — when it returns, the modules are installed. Do
-     **not** wait, sleep or pause for it; immediately re-check the states once with
-     `search-read`, then continue.
+   - **Install ALL the modules you need in ONE blocking call** before importing
+     (crm → crm.lead, stock → stock.quant, product/sale → product.template):
+     `odoo-crud install-modules crm stock sale_management account`
+     This command installs the modules AND confirms their final state before it
+     returns (its JSON lists `not_installed` if any failed). There is **nothing to
+     wait for** — as soon as it returns, move straight on to the next step.
    - Confirm each target model and its fields exist, and adapt your CSV columns to
      what this database/version actually has:
      `odoo-crud models --filter crm` and `odoo-crud fields crm.lead`.
