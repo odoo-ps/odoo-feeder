@@ -21,6 +21,7 @@ SKILLS_REPO="odoo-ps/odoo-feeder"
 
 CRUD_TOOL="${CRUD_TOOL:-$HOME/.local/share/odoo-demo-feeder/odoo_crud.py}"
 AGY_MODEL="${AGY_MODEL:-gemini-3-pro}"
+AGY_TIMEOUT="${AGY_TIMEOUT:-20m}"   # headless print-mode budget (research+install+imports)
 
 INTERACTIVE=0
 GAVE_ARGS=0
@@ -291,6 +292,11 @@ models | fields | import-preview | import-csv. Each prints JSON
 Be verbose: announce each step before doing it and print a one-line result after
 each command, so the person watching sees clear progress.
 
+Every command is synchronous — never wait or pause for an operation to finish
+(module installs complete before the call returns). Work in one continuous pass
+and only stop after you print the SUMMARY line. Install all needed modules in a
+single button_immediate_install call rather than one at a time.
+
 Steps:
 1. Run auth-check first and stop with a clear message if it fails.
 2. Inspect the database (search-read on ir.module.module, 'models', 'fields') and
@@ -359,11 +365,11 @@ if [[ "${MODE:-batch}" == "interactive" ]]; then
     exec bwrap "${bwrap_args[@]}" agy --sandbox --model "$AGY_MODEL" "$(cat "$HERE/request.txt")"
 else
     exec bwrap "${bwrap_args[@]}" \
-        agy -p "$(cat "$HERE/request.txt")" --model "$AGY_MODEL"
+        agy -p "$(cat "$HERE/request.txt")" --model "$AGY_MODEL" --print-timeout "$AGY_TIMEOUT"
 fi
 LAUNCH
 chmod +x "$WORK/launch.sh"
-export AGY_MODEL
+export AGY_MODEL AGY_TIMEOUT
 
 if [[ "$INTERACTIVE" -eq 1 ]]; then
     # Interactive: the terminal is already a TTY, run the launcher directly.

@@ -30,15 +30,22 @@ may run). Do **not** just print CSV code blocks — write files and import them.
 5 partners", "Preview found 1 bad column, fixing"). The sales person is watching
 this output, so narrate your progress.
 
+**Never wait or pause.** Every `odoo-crud` call is synchronous — when it returns,
+the operation is done. Do not "wait for it to finish". Run the whole job in one
+continuous pass and only stop once you have printed the final `SUMMARY:` line.
+
 Work in this order:
 
 1. **Inspect the database first — never assume a model or app is available.**
    - Check the modules you will need are installed:
      `odoo-crud search-read ir.module.module --domain '[["name","in",["contacts","product","stock","crm","sale_management","account"]]]' --fields '["name","state"]'`
-   - **Install any missing module before importing to its models** (crm → crm.lead,
-     stock → stock.quant, product/sale → product.template). Find the id and install:
-     `odoo-crud call ir.module.module button_immediate_install --args '[[<module_id>]]'`
-     then re-check its state is `installed`.
+   - **Install ALL the missing modules you need in ONE call** before importing
+     (crm → crm.lead, stock → stock.quant, product/sale → product.template).
+     Collect their ids and install them together:
+     `odoo-crud call ir.module.module button_immediate_install --args '[[id1, id2, ...]]'`
+     This call is **synchronous** — when it returns, the modules are installed. Do
+     **not** wait, sleep or pause for it; immediately re-check the states once with
+     `search-read`, then continue.
    - Confirm each target model and its fields exist, and adapt your CSV columns to
      what this database/version actually has:
      `odoo-crud models --filter crm` and `odoo-crud fields crm.lead`.
