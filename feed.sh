@@ -19,7 +19,10 @@
 set -euo pipefail
 
 REPO="odoo-ps/odoo-feeder"
-RAW="https://raw.githubusercontent.com/${REPO}/main"
+# Git ref (branch, tag or commit) to fetch the feeder + CRUD tool from. Defaults
+# to main; override to test a branch, e.g. REPO_REF=imp-gum-templates.
+REPO_REF="${REPO_REF:-main}"
+RAW="https://raw.githubusercontent.com/${REPO}/${REPO_REF}"
 BIN_DIR="$HOME/.local/bin"
 DATA_DIR="$HOME/.local/share/odoo-demo-feeder"
 
@@ -190,6 +193,7 @@ export ASSUME_SIGNED_IN=1
 step "Fetching the feeder and CRUD tool"
 # --------------------------------------------------------------------------- #
 mkdir -p "$BIN_DIR" "$DATA_DIR"
+[[ "$REPO_REF" != "main" ]] && ok "Using ref '$REPO_REF'"
 fetch_to "$RAW/odoo-demo-feeder" "$BIN_DIR/odoo-demo-feeder" || die "Could not download the feeder from $RAW."
 fetch_to "$RAW/odoo_crud.py"     "$DATA_DIR/odoo_crud.py"    || die "Could not download the CRUD tool from $RAW."
 chmod +x "$BIN_DIR/odoo-demo-feeder"
