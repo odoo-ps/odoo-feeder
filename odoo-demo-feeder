@@ -237,10 +237,27 @@ command -v python3 >/dev/null 2>&1 || die "python3 is not installed. Run install
 # agy must already be signed in: its Google OAuth flow (browser + paste a code)
 # cannot run headless inside the sandbox, so an unauthenticated run would just
 # hang until the timeout. Fail fast with clear instructions instead.
-if [[ -z "${ANTIGRAVITY_TOKEN:-}" && ! -s "$HOME/.gemini/oauth_creds.json" ]]; then
-    die "agy is not signed in yet.
+#
+# Antigravity keeps its auth in the OS keyring, not in a file under ~/.gemini, so
+# we can't reliably detect sign-in by stat'ing a file (that gave false negatives
+# on fresh machines). Probe with a real bounded headless call instead. Skip the
+# probe with ASSUME_SIGNED_IN=1 (set automatically when launched via feed.sh,
+# which already checked) or ANTIGRAVITY_TOKEN for unattended runs.
+agy_signed_in() {
+    [[ -n "${ANTIGRAVITY_TOKEN:-}" || -n "${ASSUME_SIGNED_IN:-}" ]] && return 0
+    local m; m="$(agy models 2>/dev/null | grep -m1 .)"   # first valid model name
+    [[ -n "$m" ]] || return 1
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 30 agy -p ping --model "$m" --print-timeout 25s >/dev/null 2>&1
+    else
+        agy -p ping --model "$m" --print-timeout 25s >/dev/null 2>&1
+    fi
+}
+if ! agy_signed_in; then
+    die "agy does not seem to be signed in.
    Run 'agy' once and sign in with your Google account, then re-run.
-   (For unattended / CI use, set the ANTIGRAVITY_TOKEN environment variable.)"
+   (For unattended / CI use, set ANTIGRAVITY_TOKEN; to skip this check, set
+   ASSUME_SIGNED_IN=1.)"
 fi
 
 print_logo

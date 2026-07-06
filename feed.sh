@@ -148,22 +148,43 @@ else
 fi
 
 # --------------------------------------------------------------------------- #
+# Whether agy can actually reach the backend (i.e. is signed in). Antigravity
+# stores its auth in the OS keyring, NOT in a file under ~/.gemini — so there is
+# no reliable file to stat (checking oauth_creds.json gave false negatives on a
+# fresh machine). Instead we do a real, bounded headless call: it succeeds only
+# when authenticated. Set ASSUME_SIGNED_IN=1 to skip the probe (flaky network,
+# offline demos, or when you know you are logged in).
+agy_signed_in() {
+    [[ -n "${ANTIGRAVITY_TOKEN:-}" || -n "${ASSUME_SIGNED_IN:-}" ]] && return 0
+    command -v agy >/dev/null 2>&1 || return 1
+    local m; m="$(agy models 2>/dev/null | grep -m1 .)"   # first valid model name
+    [[ -n "$m" ]] || return 1
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 30 agy -p ping --model "$m" --print-timeout 25s >/dev/null 2>&1
+    else
+        agy -p ping --model "$m" --print-timeout 25s >/dev/null 2>&1
+    fi
+}
+
+# --------------------------------------------------------------------------- #
 step "Checking Google sign-in"
 # --------------------------------------------------------------------------- #
 if [[ -n "${ANTIGRAVITY_TOKEN:-}" ]]; then
     ok "Using ANTIGRAVITY_TOKEN (unattended)"
-elif [[ -s "$HOME/.gemini/oauth_creds.json" ]]; then
+elif agy_signed_in; then
     ok "Already signed in"
 elif [[ -t 0 ]]; then
     warn "You are not signed in to the AI yet — let's do the one-time sign-in."
     printf '%s' "    A browser will open. Sign in, paste the code back, then type '/quit'. Press Enter... "
     read -r _
     agy || true
-    [[ -s "$HOME/.gemini/oauth_creds.json" ]] || die "Still not signed in. Run 'agy' to sign in, then re-run."
+    agy_signed_in || die "Still not signed in. Run 'agy' to sign in, then re-run."
     ok "Signed in"
 else
     die "Not signed in and no terminal to sign in on. Run 'agy' once to sign in, or set ANTIGRAVITY_TOKEN."
 fi
+# The feeder re-checks sign-in; we just verified it, so let it trust that.
+export ASSUME_SIGNED_IN=1
 
 # --------------------------------------------------------------------------- #
 step "Fetching the feeder and CRUD tool"
