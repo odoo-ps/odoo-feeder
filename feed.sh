@@ -10,7 +10,8 @@
 #
 #   bash <(curl -fsSL .../feed.sh) --url https://mycompany.odoo.com --login admin ...
 #
-# It installs what is missing (agy, bubblewrap, Node.js, Python), fetches the
+# It installs what is missing (agy, bubblewrap, Node.js, Python, optionally gum
+# for nicer prompts), fetches the
 # latest feeder + CRUD tool, then launches. Re-running is cheap: anything already
 # present is skipped.
 #
@@ -61,6 +62,46 @@ ensure_cmd() {  # ensure_cmd <command> <apt-names...> ::: <dnf-names...>
     ok "$cmd installed"
 }
 
+# gum powers the nicer prompts, but it is OPTIONAL — the feeder falls back to
+# plain prompts without it, so every failure here is a warning, never fatal.
+# Prefer real packages: dnf ships gum directly; Debian/Ubuntu need Charm's own
+# apt repo. As a last resort, drop the userland binary into ~/.local/bin.
+ensure_gum() {
+    command -v gum >/dev/null 2>&1 && { ok "gum already present"; return 0; }
+    case "$PM" in
+        dnf)
+            $SUDO dnf install -y gum >/dev/null 2>&1 && command -v gum >/dev/null 2>&1 \
+                && { ok "gum installed (dnf)"; return 0; } ;;
+        apt)
+            # Add Charm's official apt repo (keyring + source), then install.
+            if $SUDO mkdir -p /etc/apt/keyrings 2>/dev/null \
+               && curl -fsSL https://repo.charm.sh/apt/gpg.key \
+                    | $SUDO gpg --dearmor -o /etc/apt/keyrings/charm.gpg 2>/dev/null \
+               && echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" \
+                    | $SUDO tee /etc/apt/sources.list.d/charm.list >/dev/null 2>&1; then
+                $SUDO apt-get update -y >/dev/null 2>&1 || true
+                $SUDO apt-get install -y gum >/dev/null 2>&1 && command -v gum >/dev/null 2>&1 \
+                    && { ok "gum installed (apt / repo.charm.sh)"; return 0; }
+            fi ;;
+    esac
+    # Fallback: fetch the release binary into ~/.local/bin (no sudo, no repo).
+    local ver="0.17.0" os arch tmp bin
+    os="$(uname -s)"; arch="$(uname -m)"
+    case "$arch" in x86_64|amd64) arch="x86_64";; aarch64|arm64) arch="arm64";; *) arch="";; esac
+    if [[ "$os" == "Linux" && -n "$arch" ]]; then
+        tmp="$(mktemp -d)"
+        if curl -fsSL "https://github.com/charmbracelet/gum/releases/download/v${ver}/gum_${ver}_Linux_${arch}.tar.gz" \
+              -o "$tmp/gum.tgz" 2>/dev/null && tar -xzf "$tmp/gum.tgz" -C "$tmp" 2>/dev/null; then
+            bin="$(find "$tmp" -type f -name gum | head -n1)"
+            [[ -n "$bin" ]] && install -m755 "$bin" "$BIN_DIR/gum" 2>/dev/null \
+                && { rm -rf "$tmp"; ok "gum installed (binary → $BIN_DIR)"; return 0; }
+        fi
+        rm -rf "$tmp"
+    fi
+    warn "Could not install gum — the feeder will use plain prompts (this is fine)."
+    return 0
+}
+
 # --------------------------------------------------------------------------- #
 step "Checking dependencies"
 # --------------------------------------------------------------------------- #
@@ -68,6 +109,7 @@ command -v curl >/dev/null 2>&1 || die "curl is required to bootstrap."
 ensure_cmd python3 python3            ::: python3
 ensure_cmd bwrap   bubblewrap         ::: bubblewrap
 ensure_cmd node    nodejs npm         ::: nodejs npm
+ensure_gum                            # optional: nicer prompts, plain fallback
 
 # --------------------------------------------------------------------------- #
 step "Installing the Antigravity CLI (agy)"
