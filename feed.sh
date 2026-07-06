@@ -5,6 +5,7 @@
 # Run everything from a single URL, no separate setup step:
 #
 #   bash <(curl -fsSL https://raw.githubusercontent.com/odoo-ps/odoo-feeder/main/feed.sh)
+#   bash <(wget -qO-  https://raw.githubusercontent.com/odoo-ps/odoo-feeder/main/feed.sh)
 #
 # ...optionally with flags forwarded to the feeder:
 #
@@ -28,6 +29,29 @@ step() { printf '%s\n' "${PURPLE}==> $*${RESET}"; }
 ok()   { printf '%s\n' "${GREEN}  ✔ $*${RESET}"; }
 warn() { printf '%s\n' "${RED}  ! $*${RESET}" >&2; }
 die()  { printf '%s\n' "${RED}✖ $*${RESET}" >&2; exit 1; }
+
+# --------------------------------------------------------------------------- #
+# Download helper — use curl or wget, whichever is present (Ubuntu ships wget by
+# default, other distros curl). Every download in this script goes through these.
+# --------------------------------------------------------------------------- #
+DL=""
+if   command -v curl >/dev/null 2>&1; then DL="curl"
+elif command -v wget >/dev/null 2>&1; then DL="wget"
+fi
+fetch()    {  # fetch <url>            -> writes the body to stdout
+    case "$DL" in
+        curl) curl -fsSL "$1" ;;
+        wget) wget -qO- "$1" ;;
+        *)    return 1 ;;
+    esac
+}
+fetch_to() {  # fetch_to <url> <file>  -> saves the body to <file>
+    case "$DL" in
+        curl) curl -fsSL "$1" -o "$2" ;;
+        wget) wget -q    "$1" -O "$2" ;;
+        *)    return 1 ;;
+    esac
+}
 
 # --------------------------------------------------------------------------- #
 # Detect how to install system packages (Debian/Ubuntu apt, or Fedora/RHEL dnf).
@@ -75,7 +99,7 @@ ensure_gum() {
         apt)
             # Add Charm's official apt repo (keyring + source), then install.
             if $SUDO mkdir -p /etc/apt/keyrings 2>/dev/null \
-               && curl -fsSL https://repo.charm.sh/apt/gpg.key \
+               && fetch https://repo.charm.sh/apt/gpg.key \
                     | $SUDO gpg --dearmor -o /etc/apt/keyrings/charm.gpg 2>/dev/null \
                && echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" \
                     | $SUDO tee /etc/apt/sources.list.d/charm.list >/dev/null 2>&1; then
@@ -90,8 +114,8 @@ ensure_gum() {
     case "$arch" in x86_64|amd64) arch="x86_64";; aarch64|arm64) arch="arm64";; *) arch="";; esac
     if [[ "$os" == "Linux" && -n "$arch" ]]; then
         tmp="$(mktemp -d)"
-        if curl -fsSL "https://github.com/charmbracelet/gum/releases/download/v${ver}/gum_${ver}_Linux_${arch}.tar.gz" \
-              -o "$tmp/gum.tgz" 2>/dev/null && tar -xzf "$tmp/gum.tgz" -C "$tmp" 2>/dev/null; then
+        if fetch_to "https://github.com/charmbracelet/gum/releases/download/v${ver}/gum_${ver}_Linux_${arch}.tar.gz" \
+              "$tmp/gum.tgz" 2>/dev/null && tar -xzf "$tmp/gum.tgz" -C "$tmp" 2>/dev/null; then
             bin="$(find "$tmp" -type f -name gum | head -n1)"
             [[ -n "$bin" ]] && install -m755 "$bin" "$BIN_DIR/gum" 2>/dev/null \
                 && { rm -rf "$tmp"; ok "gum installed (binary → $BIN_DIR)"; return 0; }
@@ -105,7 +129,7 @@ ensure_gum() {
 # --------------------------------------------------------------------------- #
 step "Checking dependencies"
 # --------------------------------------------------------------------------- #
-command -v curl >/dev/null 2>&1 || die "curl is required to bootstrap."
+[[ -n "$DL" ]] || die "curl or wget is required to bootstrap. Install one and re-run."
 ensure_cmd python3 python3            ::: python3
 ensure_cmd bwrap   bubblewrap         ::: bubblewrap
 ensure_cmd node    nodejs npm         ::: nodejs npm
@@ -117,7 +141,7 @@ step "Installing the Antigravity CLI (agy)"
 if command -v agy >/dev/null 2>&1; then
     ok "agy already present"
 else
-    curl -fsSL https://antigravity.google/cli/install.sh | bash
+    fetch https://antigravity.google/cli/install.sh | bash
     export PATH="$HOME/.local/bin:$PATH"
     command -v agy >/dev/null 2>&1 && { agy install || true; ok "agy installed"; } \
         || warn "agy installed but not on PATH yet — open a new terminal and run 'agy' once to log in."
@@ -145,8 +169,8 @@ fi
 step "Fetching the feeder and CRUD tool"
 # --------------------------------------------------------------------------- #
 mkdir -p "$BIN_DIR" "$DATA_DIR"
-curl -fsSL "$RAW/odoo-demo-feeder" -o "$BIN_DIR/odoo-demo-feeder" || die "Could not download the feeder from $RAW."
-curl -fsSL "$RAW/odoo_crud.py"     -o "$DATA_DIR/odoo_crud.py"    || die "Could not download the CRUD tool from $RAW."
+fetch_to "$RAW/odoo-demo-feeder" "$BIN_DIR/odoo-demo-feeder" || die "Could not download the feeder from $RAW."
+fetch_to "$RAW/odoo_crud.py"     "$DATA_DIR/odoo_crud.py"    || die "Could not download the CRUD tool from $RAW."
 chmod +x "$BIN_DIR/odoo-demo-feeder"
 ok "Feeder ready at $BIN_DIR/odoo-demo-feeder"
 echo

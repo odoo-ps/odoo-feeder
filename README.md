@@ -7,6 +7,8 @@ data — built for sales, no technical setup required.
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/odoo-ps/odoo-feeder/main/feed.sh)
+# ...or, if you have wget instead of curl:
+bash <(wget -qO- https://raw.githubusercontent.com/odoo-ps/odoo-feeder/main/feed.sh)
 ```
 
 It installs what's missing (agy, bubblewrap, Node.js, Python, and optionally gum
