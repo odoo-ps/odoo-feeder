@@ -714,6 +714,14 @@ PY
 ESC=$(printf '\033')
 if sed --version >/dev/null 2>&1; then SED_STREAM=(-u -E); else SED_STREAM=(-l -E); fi
 
+# agy can fail (e.g. a quota/auth error from the backend) without ever writing a
+# byte to its own stdout/the pty — the failure only lands in its own CLI log. Mark
+# the time before the run so we can find that log afterwards and surface the real
+# error instead of just "review the output above" when there is no output.
+AGY_LOG_DIR="$HOME/.gemini/antigravity-cli/log"
+AGY_LOG_MARK="$WORK/.agy-log-mark"
+touch "$AGY_LOG_MARK"
+
 LOG="$WORK/agy-output.log"
 set +e
 pty_run "$WORK/launch.sh" \
@@ -721,12 +729,28 @@ pty_run "$WORK/launch.sh" \
 status=${PIPESTATUS[0]}
 set -e
 
+show_agy_log_errors() {
+    [[ -d "$AGY_LOG_DIR" ]] || return 0
+    local f errs
+    # Log filenames embed a sortable YYYYMMDD_HHMMSS timestamp (cli-<ts>.log), so a
+    # plain lexicographic sort picks the most recent one — no need for `stat`,
+    # whose flags differ between macOS (BSD) and Linux (GNU).
+    f="$(find "$AGY_LOG_DIR" -name 'cli-*.log' -newer "$AGY_LOG_MARK" 2>/dev/null | sort | tail -n1)"
+    [[ -n "$f" ]] || return 0
+    errs="$(grep -E '^E[0-9]{4}' "$f" 2>/dev/null | tail -n3)"
+    [[ -n "$errs" ]] || return 0
+    warn "agy's own log ($f) reports:"
+    printf '%s\n' "$errs" | sed 's/^/    /' >&2
+}
+
 echo
 if grep -q '^SUMMARY:' "$LOG" 2>/dev/null; then
     printf '%s\n' "${GREEN}✔ Done!${RESET}"
     grep '^SUMMARY:' "$LOG" | sed "s/^/  ${GREEN}/; s/\$/${RESET}/"
 elif [[ "$status" -ne 0 ]]; then
+    show_agy_log_errors
     die "The AI agent exited with an error (code $status). See the output above."
 else
+    show_agy_log_errors
     warn "The agent finished but produced no SUMMARY line — please review the output above."
 fi
