@@ -57,32 +57,41 @@ fetch_to() {  # fetch_to <url> <file>  -> saves the body to <file>
 }
 
 # --------------------------------------------------------------------------- #
-# Detect how to install system packages (Debian/Ubuntu apt, or Fedora/RHEL dnf).
+# Detect how to install system packages: Debian/Ubuntu apt, Fedora/RHEL dnf, or
+# macOS Homebrew (brew).
 # --------------------------------------------------------------------------- #
 PM=""
 if command -v apt-get >/dev/null 2>&1; then PM="apt"
 elif command -v dnf   >/dev/null 2>&1; then PM="dnf"
+elif command -v brew  >/dev/null 2>&1; then PM="brew"
 fi
-SUDO=""; [[ "$(id -u)" -eq 0 ]] || SUDO="sudo"
+# Homebrew refuses to run under sudo; everything else needs it unless we are root.
+SUDO=""
+if [[ "$PM" != "brew" && "$(id -u)" -ne 0 ]]; then SUDO="sudo"; fi
 
-pkg_install() {  # pkg_install <apt-names...> ::: <dnf-names...>
-    local apt_pkgs=() dnf_pkgs=() seen_sep=0 a
+pkg_install() {  # pkg_install <apt-names> ::: <dnf-names> ::: <brew-names>
+    local apt_pkgs=() dnf_pkgs=() brew_pkgs=() idx=0 a
     for a in "$@"; do
-        if [[ "$a" == ":::" ]]; then seen_sep=1; continue; fi
-        if [[ "$seen_sep" -eq 0 ]]; then apt_pkgs+=("$a"); else dnf_pkgs+=("$a"); fi
+        if [[ "$a" == ":::" ]]; then idx=$((idx+1)); continue; fi
+        case "$idx" in
+            0) apt_pkgs+=("$a") ;;
+            1) dnf_pkgs+=("$a") ;;
+            2) brew_pkgs+=("$a") ;;
+        esac
     done
     case "$PM" in
-        apt) $SUDO apt-get update -y >/dev/null 2>&1 || true
-             $SUDO apt-get install -y "${apt_pkgs[@]}" ;;
-        dnf) $SUDO dnf install -y "${dnf_pkgs[@]}" ;;
-        *)   return 1 ;;
+        apt)  $SUDO apt-get update -y >/dev/null 2>&1 || true
+              $SUDO apt-get install -y "${apt_pkgs[@]}" ;;
+        dnf)  $SUDO dnf install -y "${dnf_pkgs[@]}" ;;
+        brew) brew install "${brew_pkgs[@]}" ;;
+        *)    return 1 ;;
     esac
 }
 
-ensure_cmd() {  # ensure_cmd <command> <apt-names...> ::: <dnf-names...>
+ensure_cmd() {  # ensure_cmd <command> <apt-names> ::: <dnf-names> ::: <brew-names>
     local cmd="$1"; shift
     command -v "$cmd" >/dev/null 2>&1 && { ok "$cmd already present"; return 0; }
-    [[ -n "$PM" ]] || die "$cmd is missing and no supported package manager (apt/dnf) was found. Install $cmd manually."
+    [[ -n "$PM" ]] || die "$cmd is missing and no supported package manager (apt/dnf/brew) was found. Install $cmd manually."
     warn "$cmd not found — installing..."
     pkg_install "$@" || die "Could not install $cmd automatically. Please install it and re-run."
     command -v "$cmd" >/dev/null 2>&1 || die "$cmd still not available after install."
@@ -96,6 +105,9 @@ ensure_cmd() {  # ensure_cmd <command> <apt-names...> ::: <dnf-names...>
 ensure_gum() {
     command -v gum >/dev/null 2>&1 && { ok "gum already present"; return 0; }
     case "$PM" in
+        brew)
+            brew install gum >/dev/null 2>&1 && command -v gum >/dev/null 2>&1 \
+                && { ok "gum installed (brew)"; return 0; } ;;
         dnf)
             $SUDO dnf install -y gum >/dev/null 2>&1 && command -v gum >/dev/null 2>&1 \
                 && { ok "gum installed (dnf)"; return 0; } ;;
@@ -112,12 +124,14 @@ ensure_gum() {
             fi ;;
     esac
     # Fallback: fetch the release binary into ~/.local/bin (no sudo, no repo).
+    # Charm names assets gum_<ver>_<OS>_<arch>.tar.gz where <OS> is exactly what
+    # `uname -s` prints (Linux / Darwin), so reuse it directly.
     local ver="0.17.0" os arch tmp bin
     os="$(uname -s)"; arch="$(uname -m)"
     case "$arch" in x86_64|amd64) arch="x86_64";; aarch64|arm64) arch="arm64";; *) arch="";; esac
-    if [[ "$os" == "Linux" && -n "$arch" ]]; then
+    if [[ ( "$os" == "Linux" || "$os" == "Darwin" ) && -n "$arch" ]]; then
         tmp="$(mktemp -d)"
-        if fetch_to "https://github.com/charmbracelet/gum/releases/download/v${ver}/gum_${ver}_Linux_${arch}.tar.gz" \
+        if fetch_to "https://github.com/charmbracelet/gum/releases/download/v${ver}/gum_${ver}_${os}_${arch}.tar.gz" \
               "$tmp/gum.tgz" 2>/dev/null && tar -xzf "$tmp/gum.tgz" -C "$tmp" 2>/dev/null; then
             bin="$(find "$tmp" -type f -name gum | head -n1)"
             [[ -n "$bin" ]] && install -m755 "$bin" "$BIN_DIR/gum" 2>/dev/null \
@@ -133,9 +147,14 @@ ensure_gum() {
 step "Checking dependencies"
 # --------------------------------------------------------------------------- #
 [[ -n "$DL" ]] || die "curl or wget is required to bootstrap. Install one and re-run."
-ensure_cmd python3 python3            ::: python3
-ensure_cmd bwrap   bubblewrap         ::: bubblewrap
-ensure_cmd node    nodejs npm         ::: nodejs npm
+ensure_cmd python3 python3            ::: python3        ::: python3
+ensure_cmd node    nodejs npm         ::: nodejs npm     ::: node
+# The OS-level sandbox differs per platform: Linux uses bubblewrap (installable);
+# macOS uses Seatbelt via sandbox-exec, which is built into the OS — nothing to
+# install there, so we only require bwrap on Linux.
+if [[ "$(uname -s)" != "Darwin" ]]; then
+    ensure_cmd bwrap bubblewrap       ::: bubblewrap
+fi
 ensure_gum                            # optional: nicer prompts, plain fallback
 
 # --------------------------------------------------------------------------- #

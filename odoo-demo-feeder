@@ -7,8 +7,9 @@
 # Antigravity AI agent (agy).
 #
 # By default the agent runs NON-INTERACTIVELY and inside an OS-level sandbox
-# (bubblewrap) so its only real capability is to call the CRUD tool against the
-# target database. Pass -i / --interactive to drive agy interactively instead.
+# (bubblewrap on Linux, Seatbelt/sandbox-exec on macOS) so its only real
+# capability is to call the CRUD tool against the target database. Pass
+# -i / --interactive to drive agy interactively instead.
 #
 set -euo pipefail
 
@@ -18,6 +19,10 @@ set -euo pipefail
 # Public GitHub repo (owner/repo) holding the demo skills, pulled via `npx skills`.
 # Leave empty to skip the remote skills refresh.
 SKILLS_REPO="odoo-ps/odoo-feeder"
+
+# The one-line bootstrap that installs every dependency and fetches this tool.
+# Standalone-run error messages point here (there is no separate install.sh).
+BOOTSTRAP="bash <(curl -fsSL https://raw.githubusercontent.com/${SKILLS_REPO}/main/feed.sh)"
 
 CRUD_TOOL="${CRUD_TOOL:-$HOME/.local/share/odoo-demo-feeder/odoo_crud.py}"
 AGY_MODEL="${AGY_MODEL:-gemini-3-pro}"
@@ -229,10 +234,19 @@ done
 # --------------------------------------------------------------------------- #
 # Pre-flight checks
 # --------------------------------------------------------------------------- #
-command -v agy   >/dev/null 2>&1 || die "agy (Antigravity CLI) is not installed. Run install.sh first."
-command -v bwrap >/dev/null 2>&1 || die "bubblewrap (bwrap) is not installed. Run install.sh first."
-command -v python3 >/dev/null 2>&1 || die "python3 is not installed. Run install.sh first."
-[[ -f "$CRUD_TOOL" ]] || die "CRUD tool not found at $CRUD_TOOL. Run install.sh first."
+command -v agy   >/dev/null 2>&1 || die "agy (Antigravity CLI) is not installed.
+   Run the one-line bootstrap first: $BOOTSTRAP"
+# OS-level sandbox: bubblewrap on Linux, Seatbelt (sandbox-exec) on macOS.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    command -v sandbox-exec >/dev/null 2>&1 || die "sandbox-exec (macOS Seatbelt) not found — cannot sandbox the agent."
+else
+    command -v bwrap >/dev/null 2>&1 || die "bubblewrap (bwrap) is not installed.
+   Run the one-line bootstrap first: $BOOTSTRAP"
+fi
+command -v python3 >/dev/null 2>&1 || die "python3 is not installed.
+   Run the one-line bootstrap first: $BOOTSTRAP"
+[[ -f "$CRUD_TOOL" ]] || die "CRUD tool not found at $CRUD_TOOL.
+   Run the one-line bootstrap first: $BOOTSTRAP"
 
 # agy must already be signed in: its Google OAuth flow (browser + paste a code)
 # cannot run headless inside the sandbox, so an unauthenticated run would just
@@ -550,20 +564,62 @@ for src in "$HOME/.agents/skills" "$HOME/.gemini/antigravity/skills"; do
     [[ -d "$src" ]] && cp -r "$src/." "$WORK/.agents/skills/" 2>/dev/null || true
 done
 
-# Generate a self-contained launcher inside the scratch dir. It runs agy inside a
-# bubblewrap jail: the whole system is read-only, only the scratch dir + agy's own
+# Generate a self-contained launcher inside the scratch dir. It runs agy inside an
+# OS-level jail: the whole system is read-only, only the scratch dir + agy's own
 # config/cache are writable, sensitive home dirs are masked, network is on, and
 # only the ODOO_* credentials are exposed. So the agent's only real capability is
 # to run the CRUD tool against the target database.
 #
+# The jail technology differs per platform:
+#   • Linux : bubblewrap (bwrap) namespaces.
+#   • macOS : Seatbelt via sandbox-exec + a generated SBPL profile. There is no
+#             PID/mount-namespace equivalent, so we translate the bwrap policy to
+#             "everything readable, filesystem read-only, writes only to the
+#             scratch dir + agy's config/cache/tmp, ~/.ssh unreadable, network on".
+#
 # The heredoc is quoted ('LAUNCH') so nothing expands now: ODOO_* / AGY_MODEL /
-# HOME are read from the environment at run time (inherited via `script`), keeping
-# secrets out of this file on disk.
+# HOME are read from the environment at run time, keeping secrets out of this file
+# on disk.
 cat > "$WORK/launch.sh" <<'LAUNCH'
 #!/usr/bin/env bash
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
+# --- macOS: Seatbelt (sandbox-exec) --------------------------------------- #
+# No bubblewrap on macOS. Build an SBPL profile that mirrors the bwrap policy
+# and hand off to sandbox-exec. agy inherits ODOO_*/AGY_* straight from this
+# process's environment (no --setenv needed). Paths must be the physical ones
+# the kernel sees, so resolve $HERE with `pwd -P` (mktemp lives under a symlink).
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    HERE_P="$(cd "$HERE" && pwd -P)"
+    SB="$HERE/jail.sb"
+    cat > "$SB" <<SBPL
+(version 1)
+(allow default)
+(deny file-write*)
+(allow file-write*
+    (subpath "$HERE_P")
+    (subpath "$HOME/.gemini")
+    (subpath "$HOME/.cache")
+    (subpath "$HOME/.config")
+    (subpath "$HOME/Library/Caches")
+    (subpath "$HOME/Library/Application Support")
+    (subpath "/private/tmp")
+    (subpath "/private/var/tmp")
+    (subpath "/private/var/folders")
+    (literal "/dev/null") (literal "/dev/zero")
+    (regex #"^/dev/(tty|fd|stdin|stdout|stderr)"))
+(deny file-read* (subpath "$HOME/.ssh"))
+SBPL
+    if [[ "${MODE:-batch}" == "interactive" ]]; then
+        exec sandbox-exec -f "$SB" agy --sandbox --model "$AGY_MODEL" "$(cat "$HERE/request.txt")"
+    else
+        exec sandbox-exec -f "$SB" \
+            agy -p "$(cat "$HERE/request.txt")" --model "$AGY_MODEL" --print-timeout "$AGY_TIMEOUT"
+    fi
+fi
+
+# --- Linux: bubblewrap ----------------------------------------------------- #
 bwrap_args=(
     --ro-bind / /
     --dev /dev --proc /proc --tmpfs /tmp
@@ -604,7 +660,11 @@ fi
 # the captured output. Prefer util-linux `script`; fall back to a tiny Python pty
 # wrapper so no extra system package is required (python3 is already a dependency).
 pty_run() {
-    if command -v script >/dev/null 2>&1; then
+    # util-linux `script` takes `-qec CMD FILE`; BSD/macOS `script` has a totally
+    # different signature (no -c). `script --version` succeeds only on util-linux,
+    # so use it there and fall back everywhere else (macOS, or no `script`) to a
+    # tiny Python pty wrapper — portable and it preserves the child exit code.
+    if script --version >/dev/null 2>&1; then
         script -qec "$1" /dev/null
     else
         python3 - "$1" <<'PY'
@@ -614,10 +674,17 @@ PY
     fi
 }
 
+# ANSI-escape stripper, portable across GNU and BSD sed:
+#   • `-E` (extended regex) is understood by both (GNU aliases it to -r).
+#   • unbuffered/line-buffered output keeps progress live: GNU uses -u, BSD -l.
+#   • `\x1B` is a GNU-only escape, so feed sed a literal ESC byte instead.
+ESC=$(printf '\033')
+if sed --version >/dev/null 2>&1; then SED_STREAM=(-u -E); else SED_STREAM=(-l -E); fi
+
 LOG="$WORK/agy-output.log"
 set +e
 pty_run "$WORK/launch.sh" \
-    | sed -u -r 's/\x1B\[[0-9;]*[A-Za-z]//g' | tr -d '\r' | tee "$LOG"
+    | sed "${SED_STREAM[@]}" "s/${ESC}\[[0-9;]*[A-Za-z]//g" | tr -d '\r' | tee "$LOG"
 status=${PIPESTATUS[0]}
 set -e
 
