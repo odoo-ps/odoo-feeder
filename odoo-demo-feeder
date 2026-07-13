@@ -7,8 +7,9 @@
 # Antigravity AI agent (agy).
 #
 # By default the agent runs NON-INTERACTIVELY and inside an OS-level sandbox
-# (bubblewrap) so its only real capability is to call the CRUD tool against the
-# target database. Pass -i / --interactive to drive agy interactively instead.
+# (bubblewrap on Linux, Seatbelt/sandbox-exec on macOS) so its only real
+# capability is to call the CRUD tool against the target database. Pass
+# -i / --interactive to drive agy interactively instead.
 #
 set -euo pipefail
 
@@ -18,6 +19,10 @@ set -euo pipefail
 # Public GitHub repo (owner/repo) holding the demo skills, pulled via `npx skills`.
 # Leave empty to skip the remote skills refresh.
 SKILLS_REPO="odoo-ps/odoo-feeder"
+
+# The one-line bootstrap that installs every dependency and fetches this tool.
+# Standalone-run error messages point here (there is no separate install.sh).
+BOOTSTRAP="bash <(curl -fsSL https://raw.githubusercontent.com/${SKILLS_REPO}/main/feed.sh)"
 
 CRUD_TOOL="${CRUD_TOOL:-$HOME/.local/share/odoo-demo-feeder/odoo_crud.py}"
 AGY_MODEL="${AGY_MODEL:-gemini-3-pro}"
@@ -39,6 +44,12 @@ COMPANY_SITE="${COMPANY_SITE:-}"
 EXTRA="${EXTRA:-}"
 ODOO_SIZE="${ODOO_SIZE:-}"   # small | medium | big (dataset volume)
 
+# A sales "template": a free-text block (pasted or loaded from --template FILE)
+# describing the demo to build. It is passed to the AI verbatim — never parsed —
+# so any key the sales person writes is understood by the agent.
+TEMPLATE_FILE="${TEMPLATE_FILE:-}"   # path to a template file (non-interactive load)
+TEMPLATE_TEXT="${TEMPLATE_TEXT:-}"   # raw template contents
+
 # --------------------------------------------------------------------------- #
 # Colors (Odoo brand) — degrade gracefully when no TTY / NO_COLOR
 # --------------------------------------------------------------------------- #
@@ -57,6 +68,65 @@ fi
 info()  { printf '%s\n' "${TEAL}$*${RESET}"; }
 warn()  { printf '%s\n' "${RED}! $*${RESET}" >&2; }
 die()   { printf '%s\n' "${RED}✖ $*${RESET}" >&2; exit 1; }
+
+# --------------------------------------------------------------------------- #
+# UI helpers — use `gum` for a nicer interface when it is available and we have a
+# TTY, and degrade to plain `read` prompts otherwise. Every helper prints its
+# result on stdout (so it can be captured with $(...)) and its UI on stderr, so
+# the two never mix in the captured value.
+# --------------------------------------------------------------------------- #
+HAS_GUM=0
+if command -v gum >/dev/null 2>&1 && [[ -t 0 && -t 2 ]]; then HAS_GUM=1; fi
+export GUM_INPUT_PROMPT_FOREGROUND="#714B67"   # Odoo purple accent
+
+ui_input() {  # ui_input <label> [placeholder]
+    if [[ "$HAS_GUM" -eq 1 ]]; then
+        gum input --prompt "$1 " --placeholder "${2:-}"
+    else
+        local v; read -r -p "  $1${2:+ ($2)}: " v; printf '%s' "$v"
+    fi
+}
+ui_password() {  # ui_password <label>
+    if [[ "$HAS_GUM" -eq 1 ]]; then
+        gum input --password --prompt "$1 "
+    else
+        local v; read -r -s -p "  $1 " v; printf '\n' >&2; printf '%s' "$v"
+    fi
+}
+ui_choose() {  # ui_choose <header> <option>...  -> prints the chosen option
+    local header="$1"; shift
+    if [[ "$HAS_GUM" -eq 1 ]]; then
+        gum choose --header "$header" "$@"
+    else
+        local opt i=1
+        printf '  %s\n' "$header" >&2
+        for opt in "$@"; do printf '    %d) %s\n' "$i" "$opt" >&2; i=$((i+1)); done
+        local n; read -r -p "  Choice [1]: " n; n="${n:-1}"
+        if [[ "$n" =~ ^[0-9]+$ ]] && (( n>=1 && n<=$# )); then
+            printf '%s' "${!n}"
+        else
+            printf '%s' "$1"
+        fi
+    fi
+}
+ui_write() {  # ui_write [placeholder]  -> prints the pasted multi-line text
+    if [[ "$HAS_GUM" -eq 1 ]]; then
+        # In gum ≥0.16, Enter submits and Ctrl+J inserts a newline; a pasted block
+        # keeps its own newlines, so paste then press Enter.
+        gum write --placeholder "${1:-Paste here…}" --width 0 --height 18 \
+                  --header "Paste, then Enter to submit (Ctrl+J for a new line)"
+    else
+        printf '  %s\n' "${1:-Paste your text, then press Ctrl+D when done:}" >&2
+        cat
+    fi
+}
+ui_header() {  # ui_header <text>
+    if [[ "$HAS_GUM" -eq 1 ]]; then
+        gum style --foreground "#714B67" --bold "$*"
+    else
+        info "$*"
+    fi
+}
 
 # Validate an Odoo URL: must be http(s), and never the public odoo.com site.
 # Returns non-zero (and warns) when the URL is not acceptable.
@@ -111,6 +181,19 @@ Content:
   --website URL         Customer website to research     [COMPANY_SITE]
   --notes TEXT          Extra free-text instructions for the AI  [EXTRA]
                         e.g. "also create 5 sales orders and a few invoices"
+  --template FILE       Load a template file describing the demo to build and
+                        pass it to the AI verbatim (see the template block below).
+                        Interactively, you can paste a template instead.
+
+A template is a free-text block the AI reads directly — write any keys you like:
+  name: Maison Rorive demo
+  website: https://www.maisonrorive.be
+  company_name: Maison Rorive
+  country: BE
+  apps: [sale_management, crm, website, helpdesk]
+  data_size: big
+  override_model_size: {product.product: 100, crm.lead: 30}
+  configuration: enable pricelists, multi-currency, default sales team "Retail"
 
 Other:
   -i, --interactive     Drive the AI agent interactively (advanced).
@@ -140,6 +223,7 @@ while [[ $# -gt 0 ]]; do
         --company)             need_val "$1" "${2:-}"; COMPANY_NAME="$2"; GAVE_ARGS=1; shift 2 ;;
         --website)             need_val "$1" "${2:-}"; COMPANY_SITE="$2"; GAVE_ARGS=1; shift 2 ;;
         --notes|--extra)       need_val "$1" "${2:-}"; EXTRA="$2";        GAVE_ARGS=1; shift 2 ;;
+        --template)            need_val "$1" "${2:-}"; TEMPLATE_FILE="$2"; GAVE_ARGS=1; shift 2 ;;
         -i|--interactive)      INTERACTIVE=1; shift ;;
         --plan)                PLAN=1; INTERACTIVE=1; shift ;;
         -h|--help)             usage; exit 0 ;;
@@ -150,18 +234,44 @@ done
 # --------------------------------------------------------------------------- #
 # Pre-flight checks
 # --------------------------------------------------------------------------- #
-command -v agy   >/dev/null 2>&1 || die "agy (Antigravity CLI) is not installed. Run install.sh first."
-command -v bwrap >/dev/null 2>&1 || die "bubblewrap (bwrap) is not installed. Run install.sh first."
-command -v python3 >/dev/null 2>&1 || die "python3 is not installed. Run install.sh first."
-[[ -f "$CRUD_TOOL" ]] || die "CRUD tool not found at $CRUD_TOOL. Run install.sh first."
+command -v agy   >/dev/null 2>&1 || die "agy (Antigravity CLI) is not installed.
+   Run the one-line bootstrap first: $BOOTSTRAP"
+# OS-level sandbox: bubblewrap on Linux, Seatbelt (sandbox-exec) on macOS.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    command -v sandbox-exec >/dev/null 2>&1 || die "sandbox-exec (macOS Seatbelt) not found — cannot sandbox the agent."
+else
+    command -v bwrap >/dev/null 2>&1 || die "bubblewrap (bwrap) is not installed.
+   Run the one-line bootstrap first: $BOOTSTRAP"
+fi
+command -v python3 >/dev/null 2>&1 || die "python3 is not installed.
+   Run the one-line bootstrap first: $BOOTSTRAP"
+[[ -f "$CRUD_TOOL" ]] || die "CRUD tool not found at $CRUD_TOOL.
+   Run the one-line bootstrap first: $BOOTSTRAP"
 
 # agy must already be signed in: its Google OAuth flow (browser + paste a code)
 # cannot run headless inside the sandbox, so an unauthenticated run would just
 # hang until the timeout. Fail fast with clear instructions instead.
-if [[ -z "${ANTIGRAVITY_TOKEN:-}" && ! -s "$HOME/.gemini/oauth_creds.json" ]]; then
-    die "agy is not signed in yet.
+#
+# Antigravity keeps its auth in the OS keyring, not in a file under ~/.gemini, so
+# we can't reliably detect sign-in by stat'ing a file (that gave false negatives
+# on fresh machines). Probe with a real bounded headless call instead. Skip the
+# probe with ASSUME_SIGNED_IN=1 (set automatically when launched via feed.sh,
+# which already checked) or ANTIGRAVITY_TOKEN for unattended runs.
+agy_signed_in() {
+    [[ -n "${ANTIGRAVITY_TOKEN:-}" || -n "${ASSUME_SIGNED_IN:-}" ]] && return 0
+    local m; m="$(agy models 2>/dev/null | grep -m1 .)"   # first valid model name
+    [[ -n "$m" ]] || return 1
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 30 agy -p ping --model "$m" --print-timeout 25s >/dev/null 2>&1
+    else
+        agy -p ping --model "$m" --print-timeout 25s >/dev/null 2>&1
+    fi
+}
+if ! agy_signed_in; then
+    die "agy does not seem to be signed in.
    Run 'agy' once and sign in with your Google account, then re-run.
-   (For unattended / CI use, set the ANTIGRAVITY_TOKEN environment variable.)"
+   (For unattended / CI use, set ANTIGRAVITY_TOKEN; to skip this check, set
+   ASSUME_SIGNED_IN=1.)"
 fi
 
 print_logo
@@ -169,13 +279,13 @@ print_logo
 # --------------------------------------------------------------------------- #
 # Step 1 — collect connection details
 # --------------------------------------------------------------------------- #
-info "Step 1/3 — Tell me about the database you want to fill."
+ui_header "Step 1/3 — Tell me about the database you want to fill."
 echo
 
 # URL — prompt (with a retry loop) only if not supplied; always validate.
 if [[ -z "$ODOO_URL" ]]; then
     while :; do
-        read -r -p "  Odoo URL (e.g. https://mycompany.odoo.com): " ODOO_URL
+        ODOO_URL="$(ui_input "Odoo URL" "e.g. https://mycompany.odoo.com")"
         ODOO_URL="${ODOO_URL%/}"
         check_url "$ODOO_URL" && break
         ODOO_URL=""
@@ -185,47 +295,76 @@ else
     check_url "$ODOO_URL" || die "Refusing to use this URL."
 fi
 
-[[ -n "$ODOO_LOGIN" ]]  || read -r -p "  Login (email or user): " ODOO_LOGIN
+[[ -n "$ODOO_LOGIN" ]]  || ODOO_LOGIN="$(ui_input "Login (email or user)")"
 [[ -n "$ODOO_LOGIN" ]]  || die "A login is required."
 
-[[ -n "$ODOO_SECRET" ]] || { read -r -s -p "  API key or password: " ODOO_SECRET; echo; }
+[[ -n "$ODOO_SECRET" ]] || ODOO_SECRET="$(ui_password "API key or password")"
 [[ -n "$ODOO_SECRET" ]] || die "An API key or password is required."
 
-[[ -n "$ODOO_SCOPE" ]]  || read -r -p "  Scope / industry (e.g. Plumbing, Commerce, Restaurant): " ODOO_SCOPE
-[[ -n "$ODOO_SCOPE" ]]  || die "A scope is required."
+# A --template FILE takes precedence: load it verbatim, no content prompts.
+if [[ -n "$TEMPLATE_FILE" ]]; then
+    [[ -f "$TEMPLATE_FILE" ]] || die "Template file not found: $TEMPLATE_FILE"
+    TEMPLATE_TEXT="$(cat "$TEMPLATE_FILE")"
+    [[ -n "$TEMPLATE_TEXT" ]] || die "Template file is empty: $TEMPLATE_FILE"
+fi
 
-# Optional fields — only asked when running fully interactively (no flags given).
-# The database name matters for localhost / self-hosted (SaaS auto-detects it).
-# A company + website let the AI research real data via the 'odoo-demo-csv' skill.
-if [[ "$GAVE_ARGS" -eq 0 ]]; then
-    [[ -n "$ODOO_DB" ]]      || read -r -p "  Database name (optional, needed for localhost; Enter to auto-detect): " ODOO_DB
-    [[ -n "$ODOO_SIZE" ]]    || read -r -p "  Dataset size — small / medium / big [medium]: " ODOO_SIZE
-    [[ -n "$COMPANY_NAME" ]] || read -r -p "  Customer company name (optional, Enter to skip): " COMPANY_NAME
-    [[ -n "$COMPANY_SITE" ]] || read -r -p "  Customer website to research (optional, e.g. https://acme.com): " COMPANY_SITE
-    if [[ -z "$EXTRA" ]]; then
-        echo "  Anything else the AI should do? (optional — type one or more lines,"
-        echo "  e.g. 'also create 5 sales orders'; press Enter on an empty line to finish)"
-        while IFS= read -r -p "  > " _line && [[ -n "$_line" ]]; do
-            EXTRA+="$_line"$'\n'
-        done
+# --------------------------------------------------------------------------- #
+# Content — how the demo should be built. Two ways in:
+#   • Template : paste (or --template FILE) a free-text block; it goes to the AI
+#                verbatim, so any key the sales person writes is understood.
+#   • Scratch  : answer a few questions (scope, size, company, website, notes).
+# The template chooser only appears when running interactively (no flags given).
+# --------------------------------------------------------------------------- #
+if [[ -z "$TEMPLATE_TEXT" && "$GAVE_ARGS" -eq 0 ]]; then
+    echo
+    choice="$(ui_choose "Do you want to use a template or start from scratch?" \
+        "Paste a template" "Start from scratch")"
+    if [[ "$choice" == "Paste a template" ]]; then
+        echo
+        info "  Paste your template below. Example keys:"
+        printf '%s\n' "${DIM}    name / website / company_name / country / apps / data_size /
+    override_model_size / configuration — plus any free text.${RESET}"
+        TEMPLATE_TEXT="$(ui_write "Paste your template here…")"
+        [[ -n "$(printf '%s' "$TEMPLATE_TEXT" | tr -d '[:space:]')" ]] || die "The template was empty."
     fi
 fi
 
-# Normalise the dataset size (default medium; fall back on anything unexpected).
-ODOO_SIZE="$(printf '%s' "${ODOO_SIZE:-medium}" | tr '[:upper:]' '[:lower:]')"
-case "$ODOO_SIZE" in
-    small|medium|big) ;;
-    *) warn "Unknown size '$ODOO_SIZE' — using 'medium'."; ODOO_SIZE="medium" ;;
-esac
+# Scratch / flag-driven content: gather the individual fields. Skipped entirely
+# when a template was provided (the template already describes the demo).
+if [[ -z "$TEMPLATE_TEXT" ]]; then
+    [[ -n "$ODOO_SCOPE" ]] || ODOO_SCOPE="$(ui_input "Scope / industry" "e.g. Plumbing, Commerce, Restaurant")"
+    [[ -n "$ODOO_SCOPE" ]] || die "A scope is required (or use a template)."
+
+    # Optional fields — only asked when running fully interactively (no flags).
+    # The database name matters for localhost / self-hosted (SaaS auto-detects it).
+    if [[ "$GAVE_ARGS" -eq 0 ]]; then
+        [[ -n "$ODOO_DB" ]]      || ODOO_DB="$(ui_input "Database name" "optional — needed for localhost, Enter to auto-detect")"
+        [[ -n "$ODOO_SIZE" ]]    || ODOO_SIZE="$(ui_choose "Dataset size" small medium big)"
+        [[ -n "$COMPANY_NAME" ]] || COMPANY_NAME="$(ui_input "Customer company name" "optional, Enter to skip")"
+        [[ -n "$COMPANY_SITE" ]] || COMPANY_SITE="$(ui_input "Customer website" "optional, e.g. https://acme.com")"
+        [[ -n "$EXTRA" ]]        || EXTRA="$(ui_input "Anything else the AI should do?" "optional, e.g. also create 5 sales orders")"
+    fi
+
+    # Normalise the dataset size (default medium; fall back on anything unexpected).
+    ODOO_SIZE="$(printf '%s' "${ODOO_SIZE:-medium}" | tr '[:upper:]' '[:lower:]')"
+    case "$ODOO_SIZE" in
+        small|medium|big) ;;
+        *) warn "Unknown size '$ODOO_SIZE' — using 'medium'."; ODOO_SIZE="medium" ;;
+    esac
+fi
 
 echo
 info "  → Target  : $ODOO_URL"
 [[ -n "$ODOO_DB" ]]      && info "  → Database: $ODOO_DB"
-info "  → Scope   : $ODOO_SCOPE"
-info "  → Size    : $ODOO_SIZE"
-[[ -n "$COMPANY_NAME" ]] && info "  → Company : $COMPANY_NAME"
-[[ -n "$COMPANY_SITE" ]] && info "  → Website : $COMPANY_SITE"
-[[ -n "$EXTRA" ]]        && info "  → Notes   : $(printf '%s' "$EXTRA" | tr '\n' ' ')"
+if [[ -n "$TEMPLATE_TEXT" ]]; then
+    info "  → Source  : template ($(printf '%s' "$TEMPLATE_TEXT" | grep -c . ) non-empty lines)"
+else
+    info "  → Scope   : $ODOO_SCOPE"
+    info "  → Size    : $ODOO_SIZE"
+    [[ -n "$COMPANY_NAME" ]] && info "  → Company : $COMPANY_NAME"
+    [[ -n "$COMPANY_SITE" ]] && info "  → Website : $COMPANY_SITE"
+    [[ -n "$EXTRA" ]]        && info "  → Notes   : $(printf '%s' "$EXTRA" | tr '\n' ' ')"
+fi
 echo
 
 export ODOO_URL ODOO_LOGIN ODOO_SECRET ODOO_DB ODOO_SCOPE ODOO_SIZE COMPANY_NAME COMPANY_SITE
@@ -233,7 +372,7 @@ export ODOO_URL ODOO_LOGIN ODOO_SECRET ODOO_DB ODOO_SCOPE ODOO_SIZE COMPANY_NAME
 # --------------------------------------------------------------------------- #
 # Step 2 — make sure the skills are up to date
 # --------------------------------------------------------------------------- #
-info "Step 2/3 — Updating the AI skills..."
+ui_header "Step 2/3 — Updating the AI skills..."
 
 # Refresh from the public repo, quietly (npx skills is very chatty), targeting
 # Antigravity only and copying files (symlinks would break inside the sandbox).
@@ -291,18 +430,60 @@ echo
 # --------------------------------------------------------------------------- #
 # Step 3 — run the AI agent
 # --------------------------------------------------------------------------- #
-info "Step 3/3 — Populating the database. This can take a few minutes..."
+ui_header "Step 3/3 — Populating the database. This can take a few minutes..."
 echo
 
-# Describe the customer to research, if the sales person provided one.
-if [[ -n "$COMPANY_SITE" || -n "$COMPANY_NAME" ]]; then
+# Build the "what to build" section. Two shapes:
+#   • Template mode : pass the pasted block VERBATIM with a legend telling the
+#     agent how to read each key. The template drives size, apps, etc., so we do
+#     NOT inject the hardcoded size line or a fixed module list here.
+#   • Scratch mode  : the classic scope/size/company description.
+if [[ -n "$TEMPLATE_TEXT" ]]; then
+    TARGET_DESC="The sales person provided the TEMPLATE below describing the demo to build.
+Treat it as the source of truth and follow every key you recognise:
+  • name                 → a human label for the demo (not data to create)
+  • website / company_name → the real company to research (research the site FIRST)
+  • country              → set this country (and its currency) on res.company
+  • apps                 → install EXACTLY these apps (map friendly names to the
+                           technical module names, pull in dependencies) in ONE
+                           'install-modules' call
+  • data_size            → the overall scale (small/medium/big); apply it
+                           consistently to every model via the skill's anchor +
+                           ratios. If absent, use 'medium'.
+  • override_model_size  → for the models listed here, use EXACTLY these record
+                           counts instead of the ratio-derived numbers
+  • configuration        → apply these settings/config after the data is imported
+Any other key or free text: follow it as an instruction.
+
+===== TEMPLATE =====
+${TEMPLATE_TEXT}
+===== END TEMPLATE ====="
+    SIZE_DIRECTIVE=""
+    INSTALL_HINT="install EXACTLY the apps listed in the template (mapped to their
+   technical module names, with dependencies) in ONE call, e.g.
+   'install-modules sale_management crm website ...'"
+elif [[ -n "$COMPANY_SITE" || -n "$COMPANY_NAME" ]]; then
     TARGET_DESC="Build the data for this real company (research its website first):
   Company: ${COMPANY_NAME:-(name not given)}
   Website: ${COMPANY_SITE:-(website not given)}
   Industry / scope: ${ODOO_SCOPE}"
+    SIZE_DIRECTIVE="Target dataset size: ${ODOO_SIZE}. Apply this size consistently to EVERY model you
+populate, using the anchor + ratios in the skill's 'Dataset size' section — do not
+guess the volume, and don't leave some models tiny while others are large.
+
+"
+    INSTALL_HINT="install every module you need
+   in ONE call: 'install-modules crm stock sale_management account'"
 else
     TARGET_DESC="No specific customer was given — generate coherent, generic demo
 data for the \"${ODOO_SCOPE}\" industry."
+    SIZE_DIRECTIVE="Target dataset size: ${ODOO_SIZE}. Apply this size consistently to EVERY model you
+populate, using the anchor + ratios in the skill's 'Dataset size' section — do not
+guess the volume, and don't leave some models tiny while others are large.
+
+"
+    INSTALL_HINT="install every module you need
+   in ONE call: 'install-modules crm stock sale_management account'"
 fi
 
 REQUEST="You are populating an Odoo demo database for a sales demo.
@@ -310,11 +491,7 @@ REQUEST="You are populating an Odoo demo database for a sales demo.
 Follow the 'odoo-demo-csv' skill: research the target, generate Odoo-import-ready
 CSV files, and import them into the connected database.
 
-Target dataset size: ${ODOO_SIZE}. Apply this size consistently to EVERY model you
-populate, using the anchor + ratios in the skill's 'Dataset size' section — do not
-guess the volume, and don't leave some models tiny while others are large.
-
-${TARGET_DESC}
+${SIZE_DIRECTIVE}${TARGET_DESC}
 
 Use ONLY this tool for every database operation (it reads the credentials from
 environment variables, so never ask for them). Wherever the skill mentions
@@ -340,8 +517,7 @@ for. Work in one continuous pass and only stop after you print the SUMMARY line.
 
 Steps:
 1. Run auth-check first and stop with a clear message if it fails.
-2. Inspect the database ('models', 'fields'), then install every module you need
-   in ONE call: 'install-modules crm stock sale_management account' (it installs
+2. Inspect the database ('models', 'fields'), then ${INSTALL_HINT} (it installs
    and confirms before returning — do not wait). Configure the company's
    country/currency from your research.
 3. Generate the CSV files defined by the skill, write each to a file in the
@@ -360,9 +536,10 @@ fi
 
 # Plan mode: make the agent lay out a plan and wait for approval before acting.
 if [[ "$PLAN" -eq 1 ]]; then
+    if [[ -n "$TEMPLATE_TEXT" ]]; then PLAN_SIZE="the template's data_size"; else PLAN_SIZE="'${ODOO_SIZE}'"; fi
     REQUEST="FIRST, present a short PLAN and WAIT for my approval before you change
 anything. The plan must list: the modules you will install, the record counts per
-model for the '${ODOO_SIZE}' size, and the files you will create. Do NOT run any
+model for ${PLAN_SIZE}, and the files you will create. Do NOT run any
 create/import/install until I reply to approve.
 
 ${REQUEST}"
@@ -387,20 +564,62 @@ for src in "$HOME/.agents/skills" "$HOME/.gemini/antigravity/skills"; do
     [[ -d "$src" ]] && cp -r "$src/." "$WORK/.agents/skills/" 2>/dev/null || true
 done
 
-# Generate a self-contained launcher inside the scratch dir. It runs agy inside a
-# bubblewrap jail: the whole system is read-only, only the scratch dir + agy's own
+# Generate a self-contained launcher inside the scratch dir. It runs agy inside an
+# OS-level jail: the whole system is read-only, only the scratch dir + agy's own
 # config/cache are writable, sensitive home dirs are masked, network is on, and
 # only the ODOO_* credentials are exposed. So the agent's only real capability is
 # to run the CRUD tool against the target database.
 #
+# The jail technology differs per platform:
+#   • Linux : bubblewrap (bwrap) namespaces.
+#   • macOS : Seatbelt via sandbox-exec + a generated SBPL profile. There is no
+#             PID/mount-namespace equivalent, so we translate the bwrap policy to
+#             "everything readable, filesystem read-only, writes only to the
+#             scratch dir + agy's config/cache/tmp, ~/.ssh unreadable, network on".
+#
 # The heredoc is quoted ('LAUNCH') so nothing expands now: ODOO_* / AGY_MODEL /
-# HOME are read from the environment at run time (inherited via `script`), keeping
-# secrets out of this file on disk.
+# HOME are read from the environment at run time, keeping secrets out of this file
+# on disk.
 cat > "$WORK/launch.sh" <<'LAUNCH'
 #!/usr/bin/env bash
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
+# --- macOS: Seatbelt (sandbox-exec) --------------------------------------- #
+# No bubblewrap on macOS. Build an SBPL profile that mirrors the bwrap policy
+# and hand off to sandbox-exec. agy inherits ODOO_*/AGY_* straight from this
+# process's environment (no --setenv needed). Paths must be the physical ones
+# the kernel sees, so resolve $HERE with `pwd -P` (mktemp lives under a symlink).
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    HERE_P="$(cd "$HERE" && pwd -P)"
+    SB="$HERE/jail.sb"
+    cat > "$SB" <<SBPL
+(version 1)
+(allow default)
+(deny file-write*)
+(allow file-write*
+    (subpath "$HERE_P")
+    (subpath "$HOME/.gemini")
+    (subpath "$HOME/.cache")
+    (subpath "$HOME/.config")
+    (subpath "$HOME/Library/Caches")
+    (subpath "$HOME/Library/Application Support")
+    (subpath "/private/tmp")
+    (subpath "/private/var/tmp")
+    (subpath "/private/var/folders")
+    (literal "/dev/null") (literal "/dev/zero")
+    (regex #"^/dev/(tty|fd|stdin|stdout|stderr)"))
+(deny file-read* (subpath "$HOME/.ssh"))
+SBPL
+    if [[ "${MODE:-batch}" == "interactive" ]]; then
+        exec sandbox-exec -f "$SB" agy --sandbox --model "$AGY_MODEL" "$(cat "$HERE/request.txt")"
+    else
+        exec sandbox-exec -f "$SB" \
+            agy -p "$(cat "$HERE/request.txt")" --model "$AGY_MODEL" --print-timeout "$AGY_TIMEOUT"
+    fi
+fi
+
+# --- Linux: bubblewrap ----------------------------------------------------- #
 bwrap_args=(
     --ro-bind / /
     --dev /dev --proc /proc --tmpfs /tmp
@@ -441,29 +660,97 @@ fi
 # the captured output. Prefer util-linux `script`; fall back to a tiny Python pty
 # wrapper so no extra system package is required (python3 is already a dependency).
 pty_run() {
-    if command -v script >/dev/null 2>&1; then
+    # util-linux `script` takes `-qec CMD FILE`; BSD/macOS `script` has a totally
+    # different signature (no -c). `script --version` succeeds only on util-linux,
+    # so use it there and fall back everywhere else (macOS, or no `script`) to a
+    # tiny Python pty wrapper — portable and it preserves the child exit code.
+    if script --version >/dev/null 2>&1; then
         script -qec "$1" /dev/null
     else
+        # Not plain pty.spawn(): on macOS the pty master never signals EOF/error
+        # once the child exits (a long-standing CPython bug — spawn()'s select()
+        # loop blocks forever even though all output already streamed), so the
+        # whole pipeline hangs after the agent finishes instead of returning.
+        # Poll the child's exit status directly instead of waiting on EOF, and
+        # only stop once a post-exit read comes back empty (fully drained).
         python3 - "$1" <<'PY'
-import os, pty, sys
-os._exit(os.waitstatus_to_exitcode(pty.spawn([sys.argv[1]])))
+import os, sys, pty, select
+
+def spawn(argv):
+    pid, master_fd = pty.fork()
+    if pid == 0:
+        os.execvp(argv[0], argv)
+    exited = False
+    status = 0
+    while True:
+        rfds, _, _ = select.select([master_fd], [], [], 0.25)
+        got_data = False
+        if master_fd in rfds:
+            try:
+                data = os.read(master_fd, 4096)
+            except OSError:
+                data = b""
+            if data:
+                os.write(1, data)
+                got_data = True
+        if not exited:
+            wpid, status = os.waitpid(pid, os.WNOHANG)
+            if wpid == pid:
+                exited = True
+        if exited and not got_data:
+            break
+    os.close(master_fd)
+    return status
+
+sys.exit(os.waitstatus_to_exitcode(spawn([sys.argv[1]])))
 PY
     fi
 }
 
+# ANSI-escape stripper, portable across GNU and BSD sed:
+#   • `-E` (extended regex) is understood by both (GNU aliases it to -r).
+#   • unbuffered/line-buffered output keeps progress live: GNU uses -u, BSD -l.
+#   • `\x1B` is a GNU-only escape, so feed sed a literal ESC byte instead.
+ESC=$(printf '\033')
+if sed --version >/dev/null 2>&1; then SED_STREAM=(-u -E); else SED_STREAM=(-l -E); fi
+
+# agy can fail (e.g. a quota/auth error from the backend) without ever writing a
+# byte to its own stdout/the pty — the failure only lands in its own CLI log. Mark
+# the time before the run so we can find that log afterwards and surface the real
+# error instead of just "review the output above" when there is no output.
+AGY_LOG_DIR="$HOME/.gemini/antigravity-cli/log"
+AGY_LOG_MARK="$WORK/.agy-log-mark"
+touch "$AGY_LOG_MARK"
+
 LOG="$WORK/agy-output.log"
 set +e
 pty_run "$WORK/launch.sh" \
-    | sed -u -r 's/\x1B\[[0-9;]*[A-Za-z]//g' | tr -d '\r' | tee "$LOG"
+    | sed "${SED_STREAM[@]}" "s/${ESC}\[[0-9;]*[A-Za-z]//g" | tr -d '\r' | tee "$LOG"
 status=${PIPESTATUS[0]}
 set -e
+
+show_agy_log_errors() {
+    [[ -d "$AGY_LOG_DIR" ]] || return 0
+    local f errs
+    # Log filenames embed a sortable YYYYMMDD_HHMMSS timestamp (cli-<ts>.log), so a
+    # plain lexicographic sort picks the most recent one — no need for `stat`,
+    # whose flags differ between macOS (BSD) and Linux (GNU).
+    f="$(find "$AGY_LOG_DIR" -name 'cli-*.log' -newer "$AGY_LOG_MARK" 2>/dev/null | sort | tail -n1)"
+    [[ -n "$f" ]] || return 0
+    errs="$(grep -E '^E[0-9]{4}' "$f" 2>/dev/null | tail -n3)"
+    [[ -n "$errs" ]] || return 0
+    warn "agy's own log ($f) reports:"
+    printf '%s\n' "$errs" | sed 's/^/    /' >&2
+}
 
 echo
 if grep -q '^SUMMARY:' "$LOG" 2>/dev/null; then
     printf '%s\n' "${GREEN}✔ Done!${RESET}"
     grep '^SUMMARY:' "$LOG" | sed "s/^/  ${GREEN}/; s/\$/${RESET}/"
 elif [[ "$status" -ne 0 ]]; then
+    show_agy_log_errors
     die "The AI agent exited with an error (code $status). See the output above."
 else
+    show_agy_log_errors
     warn "The agent finished but produced no SUMMARY line — please review the output above."
 fi
