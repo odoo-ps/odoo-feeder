@@ -25,7 +25,14 @@ SKILLS_REPO="odoo-ps/odoo-feeder"
 BOOTSTRAP="bash <(curl -fsSL https://raw.githubusercontent.com/${SKILLS_REPO}/main/feed.sh)"
 
 CRUD_TOOL="${CRUD_TOOL:-$HOME/.local/share/odoo-demo-feeder/odoo_crud.py}"
-AGY_MODEL="${AGY_MODEL:-gemini-3-pro}"
+# Model. agy's model ids change from release to release, and an unknown id makes
+# it abort immediately ("model ... is not recognized as a known model"), so never
+# hardcode one: leave this empty and let resolve_agy_model() pick from what the
+# installed agy actually offers (`agy models`). Setting AGY_MODEL still wins, as
+# long as that id exists.
+AGY_MODEL="${AGY_MODEL:-}"
+# Preferred ids, best first — the first one this agy build offers is used.
+AGY_MODEL_PREFS="gemini-3.1-pro-high gemini-3.1-pro-low gemini-3.6-flash-high gemini-3.5-flash-high"
 AGY_TIMEOUT="${AGY_TIMEOUT:-20m}"   # headless print-mode budget (research+install+imports)
 
 INTERACTIVE=0
@@ -248,6 +255,26 @@ command -v python3 >/dev/null 2>&1 || die "python3 is not installed.
 [[ -f "$CRUD_TOOL" ]] || die "CRUD tool not found at $CRUD_TOOL.
    Run the one-line bootstrap first: $BOOTSTRAP"
 
+# Pick the model to run with, from the ids this agy build advertises. Keeping the
+# list authoritative (instead of a hardcoded id) is what stops the run from dying
+# with "model ... is not recognized" after every Antigravity model rename.
+AGY_MODELS=""   # newline-separated `agy models` output, reused by the probe below
+resolve_agy_model() {
+    AGY_MODELS="$(agy models 2>/dev/null || true)"
+    [[ -n "$AGY_MODELS" ]] || return 0   # can't list (e.g. not signed in) — leave as is
+    local m
+    if [[ -n "$AGY_MODEL" ]]; then
+        grep -qxF -- "$AGY_MODEL" <<<"$AGY_MODELS" && return 0
+        warn "agy does not know the model '$AGY_MODEL' — falling back to an available one.
+   This agy build offers: $(tr '\n' ' ' <<<"$AGY_MODELS")"
+    fi
+    for m in $AGY_MODEL_PREFS; do
+        if grep -qxF -- "$m" <<<"$AGY_MODELS"; then AGY_MODEL="$m"; return 0; fi
+    done
+    AGY_MODEL="$(head -n1 <<<"$AGY_MODELS")"   # none of the preferences exist
+}
+resolve_agy_model
+
 # agy must already be signed in: its Google OAuth flow (browser + paste a code)
 # cannot run headless inside the sandbox, so an unauthenticated run would just
 # hang until the timeout. Fail fast with clear instructions instead.
@@ -259,12 +286,13 @@ command -v python3 >/dev/null 2>&1 || die "python3 is not installed.
 # which already checked) or ANTIGRAVITY_TOKEN for unattended runs.
 agy_signed_in() {
     [[ -n "${ANTIGRAVITY_TOKEN:-}" || -n "${ASSUME_SIGNED_IN:-}" ]] && return 0
-    local m; m="$(agy models 2>/dev/null | grep -m1 .)"   # first valid model name
-    [[ -n "$m" ]] || return 1
+    # Probe with the model we are actually going to use, so an unusable model id
+    # surfaces here rather than half a minute into the real run.
+    [[ -n "$AGY_MODEL" ]] || return 1
     if command -v timeout >/dev/null 2>&1; then
-        timeout 30 agy -p ping --model "$m" --print-timeout 25s >/dev/null 2>&1
+        timeout 30 agy -p ping --model "$AGY_MODEL" --print-timeout 25s >/dev/null 2>&1
     else
-        agy -p ping --model "$m" --print-timeout 25s >/dev/null 2>&1
+        agy -p ping --model "$AGY_MODEL" --print-timeout 25s >/dev/null 2>&1
     fi
 }
 if ! agy_signed_in; then
@@ -273,6 +301,9 @@ if ! agy_signed_in; then
    (For unattended / CI use, set ANTIGRAVITY_TOKEN; to skip this check, set
    ASSUME_SIGNED_IN=1.)"
 fi
+[[ -n "$AGY_MODEL" ]] || die "Could not determine which agy model to use.
+   Run 'agy models' to see the available ids, then re-run with
+   AGY_MODEL=<id> (e.g. AGY_MODEL=gemini-3.1-pro-high)."
 
 print_logo
 
