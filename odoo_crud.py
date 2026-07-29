@@ -160,6 +160,27 @@ def cmd_fields(args):
     ok(execute(args.model, "fields_get", [], {"attributes": attrs}))
 
 
+def _disable_demo_data():
+    """Stop Odoo from loading demo data for modules installed from here on.
+
+    A module's demo data is only loaded on install if the database is
+    flagged as "demo-enabled" (any ir.module.module record, typically
+    'base', has demo=True — set once at database creation). There is no
+    per-call RPC flag to skip it; clearing that flag on every module that
+    currently carries it is what stops button_immediate_install from
+    pulling in demo records for modules installed afterwards.
+    """
+    demo_recs = execute(
+        "ir.module.module", "search_read",
+        [[["demo", "=", True]]], {"fields": ["id"]},
+    )
+    if demo_recs:
+        execute(
+            "ir.module.module", "write",
+            [[r["id"] for r in demo_recs], {"demo": False}],
+        )
+
+
 def cmd_install_modules(args):
     """Install modules by technical name and confirm — a single blocking call.
 
@@ -178,6 +199,7 @@ def cmd_install_modules(args):
     to_install = [r["id"] for r in recs if r.get("state") == "uninstalled"]
 
     if to_install:
+        _disable_demo_data()
         execute("ir.module.module", "button_immediate_install", [to_install])
 
     # Fresh connection (registry has reloaded) to report the final states.
