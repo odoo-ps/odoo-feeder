@@ -22,9 +22,8 @@ REPO="odoo-ps/odoo-feeder"
 # Git ref (branch, tag or commit) to fetch the feeder + CRUD tool from. Defaults
 # to main; override to test a branch, e.g. REPO_REF=imp-gum-templates.
 REPO_REF="${REPO_REF:-main}"
-# Which AI CLI drives the agent. Only "agy" (Antigravity) is implemented today;
-# this selector exists so other providers (Claude Code, Copilot, ...) can be
-# plugged in later without touching the install/sandbox scaffolding.
+# Which AI CLI drives the agent: "agy" (Antigravity, default), "copilot"
+# (GitHub Copilot CLI) or "claude" (Claude Code).
 AI_CLI="${AI_CLI:-agy}"
 RAW="https://raw.githubusercontent.com/${REPO}/${REPO_REF}"
 BIN_DIR="$HOME/.local/bin"
@@ -148,22 +147,21 @@ ensure_gum() {
 }
 
 # --------------------------------------------------------------------------- #
-# AI CLI provider dispatch — agy (Antigravity) is the only implemented
-# provider; every function below is the seam a future provider plugs into.
-# Unknown/not-yet-implemented providers fail fast, before any install or
-# network work happens.
+# AI CLI provider dispatch — agy (Antigravity), copilot (GitHub Copilot CLI)
+# and claude (Claude Code) are implemented. Unknown providers fail fast,
+# before any install or network work happens.
 # --------------------------------------------------------------------------- #
 provider_supported() {
     case "$AI_CLI" in
-        agy|copilot) ;;
-        claude) die "AI_CLI='$AI_CLI' is planned but not implemented yet. Only 'agy' and 'copilot' are supported today." ;;
-        *)      die "Unknown AI_CLI='$AI_CLI'. Only 'agy' and 'copilot' are supported today." ;;
+        agy|copilot|claude) ;;
+        *)      die "Unknown AI_CLI='$AI_CLI'. Only 'agy', 'copilot' and 'claude' are supported today." ;;
     esac
 }
 provider_bin() {
     case "$AI_CLI" in
         agy)     printf 'agy' ;;
         copilot) printf 'copilot' ;;
+        claude)  printf 'claude' ;;
     esac
 }
 
@@ -172,6 +170,7 @@ provider_install() {
     case "$AI_CLI" in
         agy)     fetch https://antigravity.google/cli/install.sh | bash ;;
         copilot) fetch https://gh.io/copilot-install | bash ;;
+        claude)  fetch https://code.claude.com/install.sh | bash ;;
     esac
 }
 
@@ -206,10 +205,12 @@ fi
 
 # --------------------------------------------------------------------------- #
 # Whether the provider CLI can actually reach its backend (i.e. is signed in).
-# Neither agy (Antigravity, OS keyring) nor copilot reliably expose sign-in via
-# a file to stat, so we do a real, bounded headless call in each case: it
-# succeeds only when authenticated. Set ASSUME_SIGNED_IN=1 to skip the probe
-# (flaky network, offline demos, or when you know you are logged in).
+# agy (Antigravity, OS keyring) and copilot don't reliably expose sign-in via a
+# file to stat, so we do a real, bounded headless call for those. claude has an
+# actual documented status command (`claude auth status`, exit 0 = signed in),
+# so use that directly instead of a synthetic ping. Set ASSUME_SIGNED_IN=1 to
+# skip the probe (flaky network, offline demos, or when you know you are
+# logged in).
 provider_signed_in() {
     [[ -n "${ASSUME_SIGNED_IN:-}" ]] && return 0
     local bin; bin="$(provider_bin)"
@@ -233,13 +234,17 @@ provider_signed_in() {
                 "$bin" -p ping --allow-all-tools -s --model auto >/dev/null 2>&1
             fi
             ;;
+        claude)
+            [[ -n "${ANTHROPIC_API_KEY:-}" || -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && return 0
+            "$bin" auth status >/dev/null 2>&1
+            ;;
     esac
 }
 
 # --------------------------------------------------------------------------- #
 step "Checking sign-in"
 # --------------------------------------------------------------------------- #
-if [[ -n "${ANTIGRAVITY_TOKEN:-}${COPILOT_GITHUB_TOKEN:-}${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]]; then
+if [[ -n "${ANTIGRAVITY_TOKEN:-}${COPILOT_GITHUB_TOKEN:-}${GH_TOKEN:-}${GITHUB_TOKEN:-}${ANTHROPIC_API_KEY:-}${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
     ok "Using an auth token from the environment (unattended)"
 elif provider_signed_in; then
     ok "Already signed in"
@@ -256,11 +261,16 @@ elif [[ -t 0 ]]; then
             read -r _
             "$BIN" login || true
             ;;
+        claude)
+            printf '%s' "    A browser will open. Sign in, then come back here. Press Enter... "
+            read -r _
+            "$BIN" auth login || true
+            ;;
     esac
     provider_signed_in || die "Still not signed in. Run '$BIN' to sign in, then re-run."
     ok "Signed in"
 else
-    die "Not signed in and no terminal to sign in on. Run '$BIN' once to sign in, or set ANTIGRAVITY_TOKEN / COPILOT_GITHUB_TOKEN as appropriate."
+    die "Not signed in and no terminal to sign in on. Run '$BIN' once to sign in, or set ANTIGRAVITY_TOKEN / COPILOT_GITHUB_TOKEN / ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN as appropriate."
 fi
 # The feeder re-checks sign-in; we just verified it, so let it trust that.
 export ASSUME_SIGNED_IN=1
