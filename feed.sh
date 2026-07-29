@@ -22,6 +22,10 @@ REPO="odoo-ps/odoo-feeder"
 # Git ref (branch, tag or commit) to fetch the feeder + CRUD tool from. Defaults
 # to main; override to test a branch, e.g. REPO_REF=imp-gum-templates.
 REPO_REF="${REPO_REF:-main}"
+# Which AI CLI drives the agent. Only "agy" (Antigravity) is implemented today;
+# this selector exists so other providers (Claude Code, Copilot, ...) can be
+# plugged in later without touching the install/sandbox scaffolding.
+AI_CLI="${AI_CLI:-agy}"
 RAW="https://raw.githubusercontent.com/${REPO}/${REPO_REF}"
 BIN_DIR="$HOME/.local/bin"
 DATA_DIR="$HOME/.local/share/odoo-demo-feeder"
@@ -144,6 +148,36 @@ ensure_gum() {
 }
 
 # --------------------------------------------------------------------------- #
+# AI CLI provider dispatch — agy (Antigravity) is the only implemented
+# provider; every function below is the seam a future provider plugs into.
+# Unknown/not-yet-implemented providers fail fast, before any install or
+# network work happens.
+# --------------------------------------------------------------------------- #
+provider_supported() {
+    case "$AI_CLI" in
+        agy|copilot) ;;
+        claude) die "AI_CLI='$AI_CLI' is planned but not implemented yet. Only 'agy' and 'copilot' are supported today." ;;
+        *)      die "Unknown AI_CLI='$AI_CLI'. Only 'agy' and 'copilot' are supported today." ;;
+    esac
+}
+provider_bin() {
+    case "$AI_CLI" in
+        agy)     printf 'agy' ;;
+        copilot) printf 'copilot' ;;
+    esac
+}
+
+# provider_install — fetch and run the provider's own installer.
+provider_install() {
+    case "$AI_CLI" in
+        agy)     fetch https://antigravity.google/cli/install.sh | bash ;;
+        copilot) fetch https://gh.io/copilot-install | bash ;;
+    esac
+}
+
+provider_supported
+
+# --------------------------------------------------------------------------- #
 step "Checking dependencies"
 # --------------------------------------------------------------------------- #
 [[ -n "$DL" ]] || die "curl or wget is required to bootstrap. Install one and re-run."
@@ -158,52 +192,75 @@ fi
 ensure_gum                            # optional: nicer prompts, plain fallback
 
 # --------------------------------------------------------------------------- #
-step "Installing the Antigravity CLI (agy)"
+step "Installing the AI CLI ($AI_CLI)"
 # --------------------------------------------------------------------------- #
-if command -v agy >/dev/null 2>&1; then
-    ok "agy already present"
+BIN="$(provider_bin)"
+if command -v "$BIN" >/dev/null 2>&1; then
+    ok "$BIN already present"
 else
-    fetch https://antigravity.google/cli/install.sh | bash
+    provider_install
     export PATH="$HOME/.local/bin:$PATH"
-    command -v agy >/dev/null 2>&1 && { agy install || true; ok "agy installed"; } \
-        || warn "agy installed but not on PATH yet — open a new terminal and run 'agy' once to log in."
+    command -v "$BIN" >/dev/null 2>&1 && { "$BIN" install || true; ok "$BIN installed"; } \
+        || warn "$BIN installed but not on PATH yet — open a new terminal and run '$BIN' once to log in."
 fi
 
 # --------------------------------------------------------------------------- #
-# Whether agy can actually reach the backend (i.e. is signed in). Antigravity
-# stores its auth in the OS keyring, NOT in a file under ~/.gemini — so there is
-# no reliable file to stat (checking oauth_creds.json gave false negatives on a
-# fresh machine). Instead we do a real, bounded headless call: it succeeds only
-# when authenticated. Set ASSUME_SIGNED_IN=1 to skip the probe (flaky network,
-# offline demos, or when you know you are logged in).
-agy_signed_in() {
-    [[ -n "${ANTIGRAVITY_TOKEN:-}" || -n "${ASSUME_SIGNED_IN:-}" ]] && return 0
-    command -v agy >/dev/null 2>&1 || return 1
-    local m; m="$(agy models 2>/dev/null | grep -m1 .)"   # first valid model name
-    [[ -n "$m" ]] || return 1
-    if command -v timeout >/dev/null 2>&1; then
-        timeout 30 agy -p ping --model "$m" --print-timeout 25s >/dev/null 2>&1
-    else
-        agy -p ping --model "$m" --print-timeout 25s >/dev/null 2>&1
-    fi
+# Whether the provider CLI can actually reach its backend (i.e. is signed in).
+# Neither agy (Antigravity, OS keyring) nor copilot reliably expose sign-in via
+# a file to stat, so we do a real, bounded headless call in each case: it
+# succeeds only when authenticated. Set ASSUME_SIGNED_IN=1 to skip the probe
+# (flaky network, offline demos, or when you know you are logged in).
+provider_signed_in() {
+    [[ -n "${ASSUME_SIGNED_IN:-}" ]] && return 0
+    local bin; bin="$(provider_bin)"
+    command -v "$bin" >/dev/null 2>&1 || return 1
+    case "$AI_CLI" in
+        agy)
+            [[ -n "${ANTIGRAVITY_TOKEN:-}" ]] && return 0
+            local m; m="$("$bin" models 2>/dev/null | grep -m1 .)"   # first valid model name
+            [[ -n "$m" ]] || return 1
+            if command -v timeout >/dev/null 2>&1; then
+                timeout 30 "$bin" -p ping --model "$m" --print-timeout 25s >/dev/null 2>&1
+            else
+                "$bin" -p ping --model "$m" --print-timeout 25s >/dev/null 2>&1
+            fi
+            ;;
+        copilot)
+            [[ -n "${COPILOT_GITHUB_TOKEN:-}" || -n "${GH_TOKEN:-}" || -n "${GITHUB_TOKEN:-}" ]] && return 0
+            if command -v timeout >/dev/null 2>&1; then
+                timeout 30 "$bin" -p ping --allow-all-tools -s --model auto >/dev/null 2>&1
+            else
+                "$bin" -p ping --allow-all-tools -s --model auto >/dev/null 2>&1
+            fi
+            ;;
+    esac
 }
 
 # --------------------------------------------------------------------------- #
-step "Checking Google sign-in"
+step "Checking sign-in"
 # --------------------------------------------------------------------------- #
-if [[ -n "${ANTIGRAVITY_TOKEN:-}" ]]; then
-    ok "Using ANTIGRAVITY_TOKEN (unattended)"
-elif agy_signed_in; then
+if [[ -n "${ANTIGRAVITY_TOKEN:-}${COPILOT_GITHUB_TOKEN:-}${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]]; then
+    ok "Using an auth token from the environment (unattended)"
+elif provider_signed_in; then
     ok "Already signed in"
 elif [[ -t 0 ]]; then
     warn "You are not signed in to the AI yet — let's do the one-time sign-in."
-    printf '%s' "    A browser will open. Sign in, paste the code back, then type '/quit'. Press Enter... "
-    read -r _
-    agy || true
-    agy_signed_in || die "Still not signed in. Run 'agy' to sign in, then re-run."
+    case "$AI_CLI" in
+        agy)
+            printf '%s' "    A browser will open. Sign in, paste the code back, then type '/quit'. Press Enter... "
+            read -r _
+            "$BIN" || true
+            ;;
+        copilot)
+            printf '%s' "    A browser will open. Sign in, then come back here. Press Enter... "
+            read -r _
+            "$BIN" login || true
+            ;;
+    esac
+    provider_signed_in || die "Still not signed in. Run '$BIN' to sign in, then re-run."
     ok "Signed in"
 else
-    die "Not signed in and no terminal to sign in on. Run 'agy' once to sign in, or set ANTIGRAVITY_TOKEN."
+    die "Not signed in and no terminal to sign in on. Run '$BIN' once to sign in, or set ANTIGRAVITY_TOKEN / COPILOT_GITHUB_TOKEN as appropriate."
 fi
 # The feeder re-checks sign-in; we just verified it, so let it trust that.
 export ASSUME_SIGNED_IN=1
@@ -220,7 +277,8 @@ ok "Feeder ready at $BIN_DIR/odoo-demo-feeder"
 echo
 
 # --------------------------------------------------------------------------- #
-# Hand over to the feeder (it refreshes the skill and runs agy). Any flags passed
-# to this bootstrap are forwarded verbatim.
+# Hand over to the feeder (it refreshes the skill and runs the AI CLI). Any
+# flags passed to this bootstrap are forwarded verbatim.
 # --------------------------------------------------------------------------- #
+export AI_CLI
 exec "$BIN_DIR/odoo-demo-feeder" "$@"

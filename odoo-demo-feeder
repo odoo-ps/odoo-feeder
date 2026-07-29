@@ -25,7 +25,10 @@ SKILLS_REPO="odoo-ps/odoo-feeder"
 BOOTSTRAP="bash <(curl -fsSL https://raw.githubusercontent.com/${SKILLS_REPO}/main/feed.sh)"
 
 CRUD_TOOL="${CRUD_TOOL:-$HOME/.local/share/odoo-demo-feeder/odoo_crud.py}"
-AGY_MODEL="${AGY_MODEL:-gemini-3-pro}"
+# Which AI CLI drives the agent. Only "agy" (Antigravity) is implemented today;
+# this selector exists so other providers (Claude Code, Copilot, ...) can be
+# plugged in later without touching the sandboxing scaffolding.
+AI_CLI="${AI_CLI:-agy}"
 AGY_TIMEOUT="${AGY_TIMEOUT:-20m}"   # headless print-mode budget (research+install+imports)
 
 INTERACTIVE=0
@@ -199,6 +202,8 @@ Other:
   -i, --interactive     Drive the AI agent interactively (advanced).
       --plan            Review a plan and approve it before any change is made
                         (implies interactive).
+      --ai-cli NAME     AI CLI to drive the agent: 'agy' (Antigravity, default)
+                        or 'copilot' (GitHub Copilot CLI).  [AI_CLI]
   -h, --help            Show this help.
 
 Example:
@@ -224,6 +229,7 @@ while [[ $# -gt 0 ]]; do
         --website)             need_val "$1" "${2:-}"; COMPANY_SITE="$2"; GAVE_ARGS=1; shift 2 ;;
         --notes|--extra)       need_val "$1" "${2:-}"; EXTRA="$2";        GAVE_ARGS=1; shift 2 ;;
         --template)            need_val "$1" "${2:-}"; TEMPLATE_FILE="$2"; GAVE_ARGS=1; shift 2 ;;
+        --ai-cli)              need_val "$1" "${2:-}"; AI_CLI="$2";        shift 2 ;;
         -i|--interactive)      INTERACTIVE=1; shift ;;
         --plan)                PLAN=1; INTERACTIVE=1; shift ;;
         -h|--help)             usage; exit 0 ;;
@@ -232,9 +238,63 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --------------------------------------------------------------------------- #
+# AI CLI provider dispatch — agy (Antigravity) is the only implemented
+# provider; every function below is the seam a future provider plugs into.
+# Unknown/not-yet-implemented providers fail fast, before any sandbox work.
+# --------------------------------------------------------------------------- #
+provider_supported() {
+    case "$AI_CLI" in
+        agy|copilot) ;;
+        claude) die "--ai-cli '$AI_CLI' is planned but not implemented yet. Only 'agy' and 'copilot' are supported today." ;;
+        *)      die "Unknown --ai-cli '$AI_CLI'. Only 'agy' and 'copilot' are supported today." ;;
+    esac
+}
+provider_supported
+provider_bin() {
+    case "$AI_CLI" in
+        agy)     printf 'agy' ;;
+        copilot) printf 'copilot' ;;
+    esac
+}
+provider_default_model() {
+    case "$AI_CLI" in
+        agy)     printf 'gemini-3-pro' ;;
+        copilot) printf 'auto' ;;   # let Copilot pick a model automatically
+    esac
+}
+# Only agy persists its allowlist to a settings file; copilot's permissions are
+# per-invocation flags (see the launcher below), so this is agy-only.
+provider_settings_path() { printf '%s/.gemini/antigravity-cli/settings.json' "$HOME"; }
+provider_log_dir() {
+    case "$AI_CLI" in
+        agy)     printf '%s/.gemini/antigravity-cli/log' "$HOME" ;;
+        copilot) printf '%s/.copilot/logs' "$HOME" ;;
+    esac
+}
+provider_log_glob() {
+    case "$AI_CLI" in
+        agy)     printf 'cli-*.log' ;;
+        copilot) printf 'process-*.log' ;;
+    esac
+}
+provider_log_error_pattern() {
+    case "$AI_CLI" in
+        agy)     printf '^E[0-9]{4}' ;;
+        copilot) printf '\[ERROR\]' ;;
+    esac
+}
+# Permission rules the agy agent needs: the CRUD wrapper, plus web/file access
+# for the skill (see the settings-merge block in Step 2 below). agy-only.
+provider_permission_allow_rules() { printf '%s\n' "command(odoo-crud)" "read_url(*)" "read_file(*)" "write_file(*)"; }
+
+AGY_MODEL="${AGY_MODEL:-$(provider_default_model)}"   # kept for backwards compatibility
+AI_MODEL="${AI_MODEL:-$AGY_MODEL}"
+
+# --------------------------------------------------------------------------- #
 # Pre-flight checks
 # --------------------------------------------------------------------------- #
-command -v agy   >/dev/null 2>&1 || die "agy (Antigravity CLI) is not installed.
+AI_BIN="$(provider_bin)"
+command -v "$AI_BIN" >/dev/null 2>&1 || die "$AI_BIN is not installed.
    Run the one-line bootstrap first: $BOOTSTRAP"
 # OS-level sandbox: bubblewrap on Linux, Seatbelt (sandbox-exec) on macOS.
 if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -248,30 +308,48 @@ command -v python3 >/dev/null 2>&1 || die "python3 is not installed.
 [[ -f "$CRUD_TOOL" ]] || die "CRUD tool not found at $CRUD_TOOL.
    Run the one-line bootstrap first: $BOOTSTRAP"
 
-# agy must already be signed in: its Google OAuth flow (browser + paste a code)
+# The AI CLI must already be signed in: its OAuth flow (browser + paste a code)
 # cannot run headless inside the sandbox, so an unauthenticated run would just
 # hang until the timeout. Fail fast with clear instructions instead.
 #
-# Antigravity keeps its auth in the OS keyring, not in a file under ~/.gemini, so
-# we can't reliably detect sign-in by stat'ing a file (that gave false negatives
-# on fresh machines). Probe with a real bounded headless call instead. Skip the
-# probe with ASSUME_SIGNED_IN=1 (set automatically when launched via feed.sh,
-# which already checked) or ANTIGRAVITY_TOKEN for unattended runs.
-agy_signed_in() {
-    [[ -n "${ANTIGRAVITY_TOKEN:-}" || -n "${ASSUME_SIGNED_IN:-}" ]] && return 0
-    local m; m="$(agy models 2>/dev/null | grep -m1 .)"   # first valid model name
-    [[ -n "$m" ]] || return 1
-    if command -v timeout >/dev/null 2>&1; then
-        timeout 30 agy -p ping --model "$m" --print-timeout 25s >/dev/null 2>&1
-    else
-        agy -p ping --model "$m" --print-timeout 25s >/dev/null 2>&1
-    fi
+# Neither agy (OS keyring) nor copilot reliably expose sign-in via a file to
+# stat (agy's oauth_creds.json check gave false negatives on a fresh machine).
+# Probe with a real bounded headless call instead. Skip the probe with
+# ASSUME_SIGNED_IN=1 (set automatically when launched via feed.sh, which
+# already checked) or a provider token (ANTIGRAVITY_TOKEN / COPILOT_GITHUB_TOKEN
+# / GH_TOKEN / GITHUB_TOKEN) for unattended runs.
+provider_signed_in() {
+    [[ -n "${ASSUME_SIGNED_IN:-}" ]] && return 0
+    case "$AI_CLI" in
+        agy)
+            [[ -n "${ANTIGRAVITY_TOKEN:-}" ]] && return 0
+            local m; m="$("$AI_BIN" models 2>/dev/null | grep -m1 .)"   # first valid model name
+            [[ -n "$m" ]] || return 1
+            if command -v timeout >/dev/null 2>&1; then
+                timeout 30 "$AI_BIN" -p ping --model "$m" --print-timeout 25s >/dev/null 2>&1
+            else
+                "$AI_BIN" -p ping --model "$m" --print-timeout 25s >/dev/null 2>&1
+            fi
+            ;;
+        copilot)
+            [[ -n "${COPILOT_GITHUB_TOKEN:-}" || -n "${GH_TOKEN:-}" || -n "${GITHUB_TOKEN:-}" ]] && return 0
+            if command -v timeout >/dev/null 2>&1; then
+                timeout 30 "$AI_BIN" -p ping --allow-all-tools -s --model "$(provider_default_model)" >/dev/null 2>&1
+            else
+                "$AI_BIN" -p ping --allow-all-tools -s --model "$(provider_default_model)" >/dev/null 2>&1
+            fi
+            ;;
+    esac
 }
-if ! agy_signed_in; then
-    die "agy does not seem to be signed in.
-   Run 'agy' once and sign in with your Google account, then re-run.
-   (For unattended / CI use, set ANTIGRAVITY_TOKEN; to skip this check, set
-   ASSUME_SIGNED_IN=1.)"
+if ! provider_signed_in; then
+    case "$AI_CLI" in
+        agy)     SIGN_IN_HINT="Run '$AI_BIN' once and sign in with your Google account" ;;
+        copilot) SIGN_IN_HINT="Run '$AI_BIN login' to sign in" ;;
+    esac
+    die "$AI_BIN does not seem to be signed in.
+   $SIGN_IN_HINT, then re-run.
+   (For unattended / CI use, set ANTIGRAVITY_TOKEN or COPILOT_GITHUB_TOKEN;
+   to skip this check, set ASSUME_SIGNED_IN=1.)"
 fi
 
 print_logo
@@ -386,10 +464,10 @@ fi
 
 # --- Restrict the agent to ONLY the CRUD tool ------------------------------- #
 # Install a single-name wrapper so the permission rule matches it exactly (a
-# rule on 'python3' would auto-approve any Python). Then allow only that command
-# in agy's settings — plus web research and file access the skill needs. Every
-# other command falls outside the allowlist and is not auto-approved. bwrap
-# remains the hard OS backstop underneath.
+# rule on 'python3' would auto-approve any Python). Every other command falls
+# outside the allowlist and is not auto-approved. bwrap remains the hard OS
+# backstop underneath. Shared across providers — both need the exact-name
+# wrapper, whichever way each one is told to trust it.
 CRUD_WRAPPER="$HOME/.local/bin/odoo-crud"
 mkdir -p "$HOME/.local/bin"
 cat > "$CRUD_WRAPPER" <<CRUD
@@ -398,14 +476,19 @@ exec python3 "$CRUD_TOOL" "\$@"
 CRUD
 chmod +x "$CRUD_WRAPPER"
 
-# Merge our allow-rules into agy's global settings (preserving anything already
-# there). Strict, non-regex matching (agy default) — 'command(odoo-crud)' matches
-# any 'odoo-crud <subcommand>' invocation.
-AGY_SETTINGS="$HOME/.gemini/antigravity-cli/settings.json"
-mkdir -p "$(dirname "$AGY_SETTINGS")"
-if python3 - "$AGY_SETTINGS" <<'PY'
+case "$AI_CLI" in
+agy)
+    # Merge our allow-rules into agy's global settings (preserving anything
+    # already there). Strict, non-regex matching (agy default) —
+    # 'command(odoo-crud)' matches any 'odoo-crud <subcommand>' invocation.
+    AI_SETTINGS="$(provider_settings_path)"
+    mkdir -p "$(dirname "$AI_SETTINGS")"
+    ALLOW_RULES=()
+    while IFS= read -r rule; do ALLOW_RULES+=("$rule"); done < <(provider_permission_allow_rules)
+    if python3 - "$AI_SETTINGS" "${ALLOW_RULES[@]}" <<'PY'
 import json, sys
 path = sys.argv[1]
+rules = sys.argv[2:]
 try:
     with open(path) as f:
         data = json.load(f)
@@ -414,17 +497,24 @@ try:
 except Exception:
     data = {}
 allow = data.setdefault("permissions", {}).setdefault("allow", [])
-for rule in ("command(odoo-crud)", "read_url(*)", "read_file(*)", "write_file(*)"):
+for rule in rules:
     if rule not in allow:
         allow.append(rule)
 with open(path, "w") as f:
     json.dump(data, f, indent=2)
 PY
-then
-    info "  ✔ Agent restricted to the 'odoo-crud' tool"
-else
-    warn "Could not write agy permissions; the run may prompt for approvals."
-fi
+    then
+        info "  ✔ Agent restricted to the 'odoo-crud' tool"
+    else
+        warn "Could not write $AI_BIN permissions; the run may prompt for approvals."
+    fi
+    ;;
+copilot)
+    # copilot takes no persistent allowlist file — its tool restriction is
+    # applied per-invocation via --allow-tool in the launcher below.
+    info "  ✔ Agent will be restricted to the 'odoo-crud' tool at launch"
+    ;;
+esac
 echo
 
 # --------------------------------------------------------------------------- #
@@ -553,8 +643,9 @@ trap 'rm -rf "$WORK"' EXIT
 # never lands in the process list. Credentials stay in the environment only.
 printf '%s\n' "$REQUEST" > "$WORK/request.txt"
 
-# agy needs a writable config/auth dir; make sure it exists so the bind succeeds.
-mkdir -p "$HOME/.gemini" "$HOME/.cache"
+# The AI CLI needs a writable config/auth dir; make sure it exists so the bind
+# succeeds (agy: ~/.gemini, copilot: ~/.copilot — creating both is harmless).
+mkdir -p "$HOME/.gemini" "$HOME/.copilot" "$HOME/.cache"
 
 # Make the skill visible to agy as a WORKSPACE skill (.agents/skills under the
 # working dir). This is the unambiguous location agy reads, regardless of which
@@ -577,18 +668,65 @@ done
 #             "everything readable, filesystem read-only, writes only to the
 #             scratch dir + agy's config/cache/tmp, ~/.ssh unreadable, network on".
 #
-# The heredoc is quoted ('LAUNCH') so nothing expands now: ODOO_* / AGY_MODEL /
-# HOME are read from the environment at run time, keeping secrets out of this file
-# on disk.
+# The heredoc is quoted ('LAUNCH') so nothing expands now: ODOO_* / AI_BIN /
+# AI_MODEL / HOME are read from the environment at run time, keeping secrets out
+# of this file on disk.
 cat > "$WORK/launch.sh" <<'LAUNCH'
 #!/usr/bin/env bash
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
+# Build the actual "$AI_BIN ...args" invocation into the AI_ARGV array. Each
+# provider has its own flag shape (agy: positional prompt + --sandbox/
+# --print-timeout; copilot: -p/-i + --allow-tool, no native timeout flag so
+# headless mode is wrapped in the `timeout` command instead).
+#
+# copilot's tool restriction is a per-invocation flag, not a settings file:
+# --allow-tool='shell(odoo-crud),...' pre-approves exactly the CRUD wrapper
+# (verified empirically: with this flag alone, 'cat /etc/passwd' and 'touch
+# <file>' were both attempted by the model and then DENIED by copilot's own
+# runtime, while 'odoo-crud ...' actually ran). --available-tools was tried
+# too but rejected: it doesn't enforce the "(odoo-crud)" sub-command filter at
+# all (a bare '--available-tools=shell(odoo-crud)' let arbitrary shell
+# commands through) and in combination confused the model into refusing even
+# odoo-crud calls. --allow-all-tools was rejected outright — real command
+# execution proved it approves genuinely dangerous commands, not just the
+# allowlisted one. --allow-all-urls is still needed (web_fetch/web_search
+# require a separate, per-URL permission on top of the tool permission).
+#
+# Known, accepted residual: copilot has a small built-in bypass for a couple
+# of intrinsically harmless commands (e.g. 'echo', 'cd') that always skip
+# approval regardless of --allow-tool — GitHub's own docs describe this. bwrap
+# / Seatbelt is the actual hard backstop here (read-only filesystem outside
+# the scratch dir), exactly as it already is for agy, so this bypass can't do
+# anything the sandbox doesn't already allow.
+build_ai_argv() {
+    local mode="${MODE:-batch}" request; request="$(cat "$HERE/request.txt")"
+    case "$AI_CLI" in
+        agy)
+            if [[ "$mode" == "interactive" ]]; then
+                AI_ARGV=("$AI_BIN" --sandbox --model "$AI_MODEL" "$request")
+            else
+                AI_ARGV=("$AI_BIN" -p "$request" --model "$AI_MODEL" --print-timeout "$AGY_TIMEOUT")
+            fi
+            ;;
+        copilot)
+            local tools='shell(odoo-crud),read,write,web_fetch,web_search'
+            if [[ "$mode" == "interactive" ]]; then
+                AI_ARGV=("$AI_BIN" --model "$AI_MODEL" --allow-tool="$tools" --allow-all-urls -i "$request")
+            else
+                AI_ARGV=("$AI_BIN" --model "$AI_MODEL" --allow-tool="$tools" \
+                    --allow-all-urls --no-ask-user -s -p "$request")
+                command -v timeout >/dev/null 2>&1 && AI_ARGV=(timeout "$AGY_TIMEOUT" "${AI_ARGV[@]}")
+            fi
+            ;;
+    esac
+}
+
 # --- macOS: Seatbelt (sandbox-exec) --------------------------------------- #
 # No bubblewrap on macOS. Build an SBPL profile that mirrors the bwrap policy
-# and hand off to sandbox-exec. agy inherits ODOO_*/AGY_* straight from this
-# process's environment (no --setenv needed). Paths must be the physical ones
+# and hand off to sandbox-exec. The AI CLI inherits ODOO_*/AI_*/AGY_* straight
+# from this process's environment (no --setenv needed). Paths must be the physical ones
 # the kernel sees, so resolve $HERE with `pwd -P` (mktemp lives under a symlink).
 if [[ "$(uname -s)" == "Darwin" ]]; then
     HERE_P="$(cd "$HERE" && pwd -P)"
@@ -600,6 +738,7 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
 (allow file-write*
     (subpath "$HERE_P")
     (subpath "$HOME/.gemini")
+    (subpath "$HOME/.copilot")
     (subpath "$HOME/.cache")
     (subpath "$HOME/.config")
     (subpath "$HOME/Library/Caches")
@@ -611,12 +750,8 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
     (regex #"^/dev/(tty|fd|stdin|stdout|stderr)"))
 (deny file-read* (subpath "$HOME/.ssh"))
 SBPL
-    if [[ "${MODE:-batch}" == "interactive" ]]; then
-        exec sandbox-exec -f "$SB" agy --sandbox --model "$AGY_MODEL" "$(cat "$HERE/request.txt")"
-    else
-        exec sandbox-exec -f "$SB" \
-            agy -p "$(cat "$HERE/request.txt")" --model "$AGY_MODEL" --print-timeout "$AGY_TIMEOUT"
-    fi
+    build_ai_argv
+    exec sandbox-exec -f "$SB" "${AI_ARGV[@]}"
 fi
 
 # --- Linux: bubblewrap ----------------------------------------------------- #
@@ -625,6 +760,7 @@ bwrap_args=(
     --dev /dev --proc /proc --tmpfs /tmp
     --bind "$HERE" "$HERE"
     --bind "$HOME/.gemini" "$HOME/.gemini"
+    --bind "$HOME/.copilot" "$HOME/.copilot"
     --bind "$HOME/.cache" "$HOME/.cache"
     --tmpfs "$HOME/.ssh"
     --chdir "$HERE"
@@ -638,16 +774,15 @@ bwrap_args=(
 )
 [[ -n "${ODOO_DB:-}" ]] && bwrap_args+=(--setenv ODOO_DB "$ODOO_DB")
 [[ -n "${ANTIGRAVITY_TOKEN:-}" ]] && bwrap_args+=(--setenv ANTIGRAVITY_TOKEN "$ANTIGRAVITY_TOKEN")
+[[ -n "${COPILOT_GITHUB_TOKEN:-}" ]] && bwrap_args+=(--setenv COPILOT_GITHUB_TOKEN "$COPILOT_GITHUB_TOKEN")
+[[ -n "${GH_TOKEN:-}" ]] && bwrap_args+=(--setenv GH_TOKEN "$GH_TOKEN")
+[[ -n "${GITHUB_TOKEN:-}" ]] && bwrap_args+=(--setenv GITHUB_TOKEN "$GITHUB_TOKEN")
 
-if [[ "${MODE:-batch}" == "interactive" ]]; then
-    exec bwrap "${bwrap_args[@]}" agy --sandbox --model "$AGY_MODEL" "$(cat "$HERE/request.txt")"
-else
-    exec bwrap "${bwrap_args[@]}" \
-        agy -p "$(cat "$HERE/request.txt")" --model "$AGY_MODEL" --print-timeout "$AGY_TIMEOUT"
-fi
+build_ai_argv
+exec bwrap "${bwrap_args[@]}" "${AI_ARGV[@]}"
 LAUNCH
 chmod +x "$WORK/launch.sh"
-export AGY_MODEL AGY_TIMEOUT
+export AI_CLI AI_BIN AI_MODEL AGY_TIMEOUT
 
 if [[ "$INTERACTIVE" -eq 1 ]]; then
     # Interactive: the terminal is already a TTY, run the launcher directly.
@@ -714,11 +849,14 @@ PY
 ESC=$(printf '\033')
 if sed --version >/dev/null 2>&1; then SED_STREAM=(-u -E); else SED_STREAM=(-l -E); fi
 
-# agy can fail (e.g. a quota/auth error from the backend) without ever writing a
-# byte to its own stdout/the pty — the failure only lands in its own CLI log. Mark
-# the time before the run so we can find that log afterwards and surface the real
-# error instead of just "review the output above" when there is no output.
-AGY_LOG_DIR="$HOME/.gemini/antigravity-cli/log"
+# The AI CLI can fail (e.g. a quota/auth error from the backend) without ever
+# writing a byte to its own stdout/the pty — the failure only lands in its own
+# CLI log. Mark the time before the run so we can find that log afterwards and
+# surface the real error instead of just "review the output above" when there
+# is no output.
+AGY_LOG_DIR="$(provider_log_dir)"
+AGY_LOG_GLOB="$(provider_log_glob)"
+AGY_LOG_ERROR_PATTERN="$(provider_log_error_pattern)"
 AGY_LOG_MARK="$WORK/.agy-log-mark"
 touch "$AGY_LOG_MARK"
 
@@ -732,14 +870,14 @@ set -e
 show_agy_log_errors() {
     [[ -d "$AGY_LOG_DIR" ]] || return 0
     local f errs
-    # Log filenames embed a sortable YYYYMMDD_HHMMSS timestamp (cli-<ts>.log), so a
-    # plain lexicographic sort picks the most recent one — no need for `stat`,
-    # whose flags differ between macOS (BSD) and Linux (GNU).
-    f="$(find "$AGY_LOG_DIR" -name 'cli-*.log' -newer "$AGY_LOG_MARK" 2>/dev/null | sort | tail -n1)"
+    # Log filenames embed a sortable timestamp, so a plain lexicographic sort
+    # picks the most recent one — no need for `stat`, whose flags differ
+    # between macOS (BSD) and Linux (GNU).
+    f="$(find "$AGY_LOG_DIR" -name "$AGY_LOG_GLOB" -newer "$AGY_LOG_MARK" 2>/dev/null | sort | tail -n1)"
     [[ -n "$f" ]] || return 0
-    errs="$(grep -E '^E[0-9]{4}' "$f" 2>/dev/null | tail -n3)"
+    errs="$(grep -E "$AGY_LOG_ERROR_PATTERN" "$f" 2>/dev/null | tail -n3)"
     [[ -n "$errs" ]] || return 0
-    warn "agy's own log ($f) reports:"
+    warn "$AI_BIN's own log ($f) reports:"
     printf '%s\n' "$errs" | sed 's/^/    /' >&2
 }
 
