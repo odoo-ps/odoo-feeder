@@ -614,7 +614,9 @@ Steps:
    current directory, and import them in dependency order with 'import-csv'.
 4. If an import fails, use 'import-preview', 'fields' and 'models' to find out
    why, fix the CSV, and retry.
-Finish by printing one line that starts with 'SUMMARY:' describing what you created."
+Finish by printing one line, in plain text with no markdown formatting (no
+bullets, bold, or headers), that starts with exactly 'SUMMARY:' describing what
+you created."
 
 # Append any extra free-text instructions from the sales person.
 if [[ -n "$EXTRA" ]]; then
@@ -882,9 +884,12 @@ show_agy_log_errors() {
 }
 
 echo
-if grep -q '^SUMMARY:' "$LOG" 2>/dev/null; then
+# Match loosely (case-insensitive, no line-start anchor): providers sometimes
+# wrap the requested plain-text line in markdown decoration (e.g. '**SUMMARY:**'
+# or a leading bullet) despite being told not to.
+if grep -qi 'SUMMARY:' "$LOG" 2>/dev/null; then
     printf '%s\n' "${GREEN}✔ Done!${RESET}"
-    grep '^SUMMARY:' "$LOG" | sed "s/^/  ${GREEN}/; s/\$/${RESET}/"
+    grep -i 'SUMMARY:' "$LOG" | sed "s/^/  ${GREEN}/; s/\$/${RESET}/"
 elif [[ "$status" -ne 0 ]]; then
     show_agy_log_errors
     die "The AI agent exited with an error (code $status). See the output above."
