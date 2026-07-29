@@ -48,7 +48,7 @@ Work in this order:
    - Confirm each target model and its fields exist, and adapt your CSV columns to
      what this database/version actually has:
      `odoo-crud models --filter crm` and `odoo-crud fields crm.lead`.
-2. **Configure the company** from your research: set the country and currency on
+2. **Configure the company** from your research: set the country, company name and currency on
    `res.company` to match the company's real location (find the id with
    `search-read`, then `call res.company write`).
 3. **Generate & import** each CSV: write it to a file (e.g. `res_partner.csv`),
