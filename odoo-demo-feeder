@@ -524,7 +524,14 @@ CRUD_WRAPPER="$HOME/.local/bin/odoo-crud"
 mkdir -p "$HOME/.local/bin"
 cat > "$CRUD_WRAPPER" <<CRUD
 #!/usr/bin/env bash
-exec python3 "$CRUD_TOOL" "\$@"
+# Record every real invocation AND its exit code, independently of anything
+# the model later claims in its own summary — a failed call (e.g. a rejected
+# import-csv) is not proof of a write, so the audit check after the run in
+# Step 3 needs the outcome, not just that the command was attempted.
+python3 "$CRUD_TOOL" "\$@"
+status=\$?
+[[ -n "\${ODOO_CRUD_AUDIT_LOG:-}" ]] && printf '%s %s exit=%s\n' "\$(date -u +%FT%TZ)" "\$*" "\$status" >> "\$ODOO_CRUD_AUDIT_LOG" 2>/dev/null
+exit "\$status"
 CRUD
 chmod +x "$CRUD_WRAPPER"
 
@@ -731,6 +738,10 @@ cat > "$WORK/launch.sh" <<'LAUNCH'
 #!/usr/bin/env bash
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# Ground truth for whether the model actually ran odoo-crud at all, checked
+# against its claimed SUMMARY after the run — see the CRUD_WRAPPER above and
+# the audit check below.
+export ODOO_CRUD_AUDIT_LOG="$HERE/.odoo-crud-calls.log"
 
 # Build the actual "$AI_BIN ...args" invocation into the AI_ARGV array. Each
 # provider has its own flag shape (agy: positional prompt + --sandbox/
@@ -850,6 +861,7 @@ bwrap_args=(
     --setenv ODOO_LOGIN "$ODOO_LOGIN"
     --setenv ODOO_SECRET "$ODOO_SECRET"
     --setenv ODOO_SCOPE "$ODOO_SCOPE"
+    --setenv ODOO_CRUD_AUDIT_LOG "$ODOO_CRUD_AUDIT_LOG"
 )
 [[ -n "${ODOO_DB:-}" ]] && bwrap_args+=(--setenv ODOO_DB "$ODOO_DB")
 [[ -n "${ANTIGRAVITY_TOKEN:-}" ]] && bwrap_args+=(--setenv ANTIGRAVITY_TOKEN "$ANTIGRAVITY_TOKEN")
@@ -946,11 +958,38 @@ AGY_LOG_MARK="$WORK/.agy-log-mark"
 touch "$AGY_LOG_MARK"
 
 LOG="$WORK/agy-output.log"
+# Ground truth for whether the model actually ran odoo-crud, independent of
+# whatever it claims in its own SUMMARY (see CRUD_WRAPPER above, Step 2 —
+# every real invocation + its exit code is appended there, so a model that
+# just narrates fake tool calls and results — a real failure mode, especially
+# with weaker/free models via --openrouter-model — leaves this file empty).
+AUDIT_LOG="$WORK/.odoo-crud-calls.log"
+
 set +e
 pty_run "$WORK/launch.sh" \
     | sed "${SED_STREAM[@]}" "s/${ESC}\[[0-9;]*[A-Za-z]//g" | tr -d '\r' | tee "$LOG"
 status=${PIPESTATUS[0]}
 set -e
+
+# $WORK is deleted on exit (see the trap above), so persist this run's full
+# transcript + odoo-crud audit trail somewhere that survives the process, and
+# print it below — no matter how the run turns out — so it's always there to
+# inspect instead of only "see the output above" in a scrollback that may
+# already be gone.
+PERSIST_LOG_DIR="$HOME/.local/share/odoo-demo-feeder/logs"
+mkdir -p "$PERSIST_LOG_DIR"
+PERSIST_LOG="$PERSIST_LOG_DIR/run-$(date -u +%Y%m%dT%H%M%SZ).log"
+{
+    cat "$LOG" 2>/dev/null
+    echo
+    echo "----- odoo-crud calls actually made (audit trail) -----"
+    if [[ -s "$AUDIT_LOG" ]]; then
+        cat "$AUDIT_LOG"
+    else
+        echo "(none — odoo-crud was never invoked)"
+    fi
+} > "$PERSIST_LOG" 2>/dev/null || true
+info "Full log: file://$PERSIST_LOG"
 
 show_agy_log_errors() {
     [[ -d "$AGY_LOG_DIR" ]] || return 0
@@ -993,13 +1032,38 @@ diagnose_provider_error() {
     fi
 }
 
+# See AUDIT_LOG's definition above (right after LOG).
+check_real_writes_happened() {
+    if [[ ! -s "$AUDIT_LOG" ]]; then
+        warn "odoo-crud was never actually invoked during this run."
+        warn "  → The model narrated tool calls and a summary without ever running them —"
+        warn "    nothing was written to the database. This is a known failure mode with"
+        warn "    models that don't reliably support real tool/function calling; if you're"
+        warn "    using --openrouter-model, try a different (typically larger) model."
+        return 1
+    fi
+    if ! grep -qE '\b(create|write|unlink|import-csv|set-image|call)\b.*exit=0$' "$AUDIT_LOG"; then
+        warn "odoo-crud never completed a write during this run (see $AUDIT_LOG)."
+        warn "  → Either no create/write/unlink/import-csv/set-image/call was ever made, or"
+        warn "    every one of them failed (nonzero exit) — the database was not actually"
+        warn "    modified despite the summary below. Check the log above for the real error"
+        warn "    each failed call returned, then retry."
+        return 1
+    fi
+    return 0
+}
+
 echo
 # Match loosely (case-insensitive, no line-start anchor): providers sometimes
 # wrap the requested plain-text line in markdown decoration (e.g. '**SUMMARY:**'
 # or a leading bullet) despite being told not to.
-if grep -qi 'SUMMARY:' "$LOG" 2>/dev/null; then
+if grep -qi 'SUMMARY:' "$LOG" 2>/dev/null && check_real_writes_happened; then
     printf '%s\n' "${GREEN}✔ Done!${RESET}"
     grep -i 'SUMMARY:' "$LOG" | sed "s/^/  ${GREEN}/; s/\$/${RESET}/"
+elif grep -qi 'SUMMARY:' "$LOG" 2>/dev/null; then
+    printf '%s\n' "${DIM}Reported summary (not trusted — see warning above):${RESET}"
+    grep -i 'SUMMARY:' "$LOG" | sed "s/^/  ${DIM}/; s/\$/${RESET}/"
+    die "The run reported success but never actually wrote to the database."
 elif [[ "$status" -ne 0 ]]; then
     diagnose_provider_error
     show_agy_log_errors

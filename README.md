@@ -71,6 +71,17 @@ odoo-demo-feeder --ai-cli copilot --openrouter-model anthropic/claude-sonnet-4.5
 (`OPENROUTER_MODEL` env var works the same way.) No GitHub sign-in is required once
 OpenRouter is active.
 
+## Debugging a run
+
+Headless runs only print whatever the model chooses to narrate — which can look
+like progress even when nothing actually happened (e.g. a weak model fabricating
+tool calls, or a real tool call that failed and got glossed over). Every run's
+full transcript + a ground-truth audit trail of every real `odoo-crud` call
+(and its exit code) is saved to `~/.local/share/odoo-demo-feeder/logs/`; the
+feeder prints a `file://` link to it at the end of every run, success or
+failure. If the summary claims success but no write actually succeeded, the
+feeder catches that itself and reports failure instead of "✔ Done!".
+
 ## What's inside
 
 - **feed.sh** — one-shot bootstrap (provision + launch).

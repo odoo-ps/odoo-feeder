@@ -108,7 +108,7 @@ Keep the whole dataset internally consistent and proportional to the chosen size
 If the sales person asks for extra files (`mrp.bom`, employees, chart of accounts,
 etc.), generate them too, keeping the same relational logic.
 
-## Images (optional, nice to have)
+## Images
 
 Use **real** images you find while researching the site — never generate images.
 While reading the website, collect the URLs of the company logo and of product
