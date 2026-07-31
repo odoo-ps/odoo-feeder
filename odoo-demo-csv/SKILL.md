@@ -101,6 +101,11 @@ Keep the whole dataset internally consistent and proportional to the chosen size
 3. **stock.quant** — stock lines, only for items where `detailed_type = product`.
    Columns: `product_id/id` (must reuse the exact id from the product file, e.g.
    `product_1`), `inventory_quantity`, `location_id` (value: `WH/Stock`).
+   **`product_id/id` is required and easy to get wrong** (a mismatched or missing
+   id here fails with a raw "not-null constraint" error at import time) — before
+   writing this CSV, run `odoo-crud import-preview stock.quant --file <path>` and
+   confirm every row shows a real, existing product id from the product file
+   (never a made-up or renamed one), then import.
 4. **crm.lead** — leads scaled per the size section.
    Columns: `id` (e.g. `lead_1`), `name`, `partner_id/id` (reuse an id from file 1),
    `expected_revenue`, `stage_id` (value: `New`, `Qualified`, or `Proposition`).

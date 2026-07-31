@@ -78,7 +78,7 @@ def _guess_db(url):
 
 
 def execute(model, method, args=None, kwargs=None):
-    uid, models, url, db, login, secret, _version = connect()
+    uid, models, _url, db, _login, secret, _version = connect()
     try:
         return models.execute_kw(
             db, uid, secret, model, method, args or [], kwargs or {}
@@ -106,6 +106,29 @@ def cmd_auth_check(_args):
     ok({"uid": uid, "url": url, "database": db, "login": login, "version": version})
 
 
+def _unknown_fields(meta, names):
+    """Names (first dotted path segment, so 'partner_id.name' checks
+    'partner_id') absent from the model's own fields.
+
+    A guessed field name that belongs to a different model (e.g. requesting
+    'team_id' on crm.stage, or filtering uom.uom on 'category_id' — both only
+    exist on other models) fails deep inside Odoo's ORM with a raw traceback in
+    the server log instead of a clean RPC error. Catching it here turns that
+    into one clear line before the call is even made.
+    """
+    unknown = set()
+    for name in names:
+        base = str(name).split(".", 1)[0]
+        if base not in meta and base != "id":
+            unknown.add(name)
+    return sorted(unknown)
+
+
+def _unknown_domain_fields(meta, domain):
+    leaves = [leaf[0] for leaf in domain if isinstance(leaf, (list, tuple)) and len(leaf) == 3]
+    return _unknown_fields(meta, leaves)
+
+
 def cmd_search_read(args):
     domain = parse_json(args.domain, "--domain") or []
     fields = parse_json(args.fields, "--fields")
@@ -114,6 +137,15 @@ def cmd_search_read(args):
         kwargs["fields"] = fields
     if args.limit:
         kwargs["limit"] = args.limit
+    if domain or fields:
+        meta = execute(args.model, "fields_get", [], {"attributes": []})
+        unknown = _unknown_domain_fields(meta, domain) + _unknown_fields(meta, fields or [])
+        if unknown:
+            fail(
+                f"Unknown field(s) for {args.model}: {', '.join(sorted(set(unknown)))}. "
+                f"Check 'odoo-crud fields {args.model}' for the exact field names — "
+                "nothing was searched."
+            )
     ok(execute(args.model, "search_read", [domain], kwargs))
 
 
@@ -308,13 +340,30 @@ def cmd_import_preview(args):
             "type": meta.get(base, {}).get("type"),
         })
     unknown = [c["header"] for c in columns if not c["exists"]]
+    missing_required = _missing_required_fields(meta, headers)
     ok({
         "model": args.model,
         "rows": len(body),
         "columns": columns,
         "unknown_columns": unknown,
+        "missing_required_columns": missing_required,
         "sample_rows": body[:3],
     })
+
+
+def _missing_required_fields(meta, headers):
+    """Model fields Odoo marks required but absent from the CSV headers.
+
+    A missing required field (e.g. product_id on stock.quant) doesn't always
+    surface as a clean load() message — it can slip through as NULL and crash
+    at the SQL layer with a raw, uncaught 'not-null constraint' error instead.
+    Catching it here, before load() ever runs, turns that into one clear line.
+    """
+    present = {_field_base(h) for h in headers}
+    return sorted(
+        name for name, info in meta.items()
+        if info.get("required") and name not in present
+    )
 
 
 def cmd_import_csv(args):
@@ -322,6 +371,17 @@ def cmd_import_csv(args):
     the 'field/id' relational syntax, and reports per-row error messages."""
     headers, body = _read_csv(args.file)
     fields = parse_json(args.fields, "--fields") or headers
+
+    meta = execute(args.model, "fields_get", [], {"attributes": ["required"]})
+    missing_required = _missing_required_fields(meta, fields)
+    if missing_required:
+        fail(
+            f"CSV for {args.model} is missing required field(s): "
+            f"{', '.join(missing_required)}. Add a '<field>/id' (relational) or "
+            f"'<field>' column, or check 'odoo-crud fields {args.model}' for the "
+            "exact names — nothing was imported."
+        )
+
     result = execute(args.model, "load", [fields, body])
 
     # load() returns {'ids': [...] or False, 'messages': [...]}. A non-empty
