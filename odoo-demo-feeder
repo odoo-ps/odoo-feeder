@@ -29,6 +29,14 @@ CRUD_TOOL="${CRUD_TOOL:-$HOME/.local/share/odoo-demo-feeder/odoo_crud.py}"
 # (GitHub Copilot CLI) or "claude" (Claude Code).
 AI_CLI="${AI_CLI:-agy}"
 AGY_TIMEOUT="${AGY_TIMEOUT:-20m}"   # headless print-mode budget (research+install+imports)
+# OpenRouter BYOK, 'copilot' provider only: set to an OpenRouter model id (e.g.
+# anthropic/claude-sonnet-4.5) to route Copilot through OpenRouter instead of
+# GitHub's own model routing. The API key is never accepted as a flag or
+# plaintext env var — store it once in the OS keyring first:
+#   keyring set odoo-feeder openrouter-api-key
+OPENROUTER_MODEL="${OPENROUTER_MODEL:-}"
+OPENROUTER_KEYRING_SERVICE="odoo-feeder"
+OPENROUTER_KEYRING_ACCOUNT="openrouter-api-key"
 
 INTERACTIVE=0
 PLAN=0
@@ -203,6 +211,12 @@ Other:
                         (implies interactive).
       --ai-cli NAME     AI CLI to drive the agent: 'agy' (Antigravity, default),
                         'copilot' (GitHub Copilot CLI) or 'claude' (Claude Code). [AI_CLI]
+      --openrouter-model ID   Route 'copilot' through OpenRouter using this model
+                        id (e.g. anthropic/claude-sonnet-4.5), instead of
+                        GitHub's own model routing. [OPENROUTER_MODEL]
+                        The API key is read from the OS keyring, never from a
+                        flag or plaintext env var — store it once with:
+                          keyring set odoo-feeder openrouter-api-key
   -h, --help            Show this help.
 
 Example:
@@ -229,6 +243,7 @@ while [[ $# -gt 0 ]]; do
         --notes|--extra)       need_val "$1" "${2:-}"; EXTRA="$2";        GAVE_ARGS=1; shift 2 ;;
         --template)            need_val "$1" "${2:-}"; TEMPLATE_FILE="$2"; GAVE_ARGS=1; shift 2 ;;
         --ai-cli)              need_val "$1" "${2:-}"; AI_CLI="$2";        shift 2 ;;
+        --openrouter-model)    need_val "$1" "${2:-}"; OPENROUTER_MODEL="$2"; shift 2 ;;
         -i|--interactive)      INTERACTIVE=1; shift ;;
         --plan)                PLAN=1; INTERACTIVE=1; shift ;;
         -h|--help)             usage; exit 0 ;;
@@ -296,6 +311,29 @@ AGY_MODEL="${AGY_MODEL:-$(provider_default_model)}"   # kept for backwards compa
 AI_MODEL="${AI_MODEL:-$AGY_MODEL}"
 
 # --------------------------------------------------------------------------- #
+# OpenRouter BYOK (copilot only) — see `copilot help providers`. GitHub
+# Copilot CLI activates "bring your own key" mode purely via env vars, so this
+# just resolves the API key from the OS keyring and exports the right ones;
+# no GitHub sign-in is needed once this is active.
+# --------------------------------------------------------------------------- #
+if [[ -n "$OPENROUTER_MODEL" ]]; then
+    [[ "$AI_CLI" == "copilot" ]] \
+        || die "--openrouter-model / OPENROUTER_MODEL only applies to --ai-cli copilot."
+    command -v keyring >/dev/null 2>&1 \
+        || die "The 'keyring' CLI is required to read the OpenRouter API key (pip install keyring), then:
+   keyring set $OPENROUTER_KEYRING_SERVICE $OPENROUTER_KEYRING_ACCOUNT"
+    OPENROUTER_API_KEY="$(keyring get "$OPENROUTER_KEYRING_SERVICE" "$OPENROUTER_KEYRING_ACCOUNT" 2>/dev/null)" \
+        || die "No OpenRouter API key found in the OS keyring. Store it once with:
+   keyring set $OPENROUTER_KEYRING_SERVICE $OPENROUTER_KEYRING_ACCOUNT"
+    [[ -n "$OPENROUTER_API_KEY" ]] || die "The OpenRouter API key stored in the keyring is empty."
+    export COPILOT_PROVIDER_BASE_URL="https://openrouter.ai/api/v1"
+    export COPILOT_PROVIDER_TYPE="openai"
+    export COPILOT_PROVIDER_API_KEY="$OPENROUTER_API_KEY"
+    export COPILOT_MODEL="$OPENROUTER_MODEL"
+    AI_MODEL="$OPENROUTER_MODEL"   # keep the explicit --model flag in sync with BYOK
+fi
+
+# --------------------------------------------------------------------------- #
 # Pre-flight checks
 # --------------------------------------------------------------------------- #
 AI_BIN="$(provider_bin)"
@@ -339,6 +377,7 @@ provider_signed_in() {
             fi
             ;;
         copilot)
+            [[ -n "${COPILOT_PROVIDER_BASE_URL:-}" ]] && return 0   # BYOK (e.g. OpenRouter) — no GitHub auth needed
             [[ -n "${COPILOT_GITHUB_TOKEN:-}" || -n "${GH_TOKEN:-}" || -n "${GITHUB_TOKEN:-}" ]] && return 0
             if command -v timeout >/dev/null 2>&1; then
                 timeout 30 "$AI_BIN" -p ping --allow-all-tools -s --model "$(provider_default_model)" >/dev/null 2>&1
@@ -819,6 +858,10 @@ bwrap_args=(
 [[ -n "${GITHUB_TOKEN:-}" ]] && bwrap_args+=(--setenv GITHUB_TOKEN "$GITHUB_TOKEN")
 [[ -n "${ANTHROPIC_API_KEY:-}" ]] && bwrap_args+=(--setenv ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY")
 [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && bwrap_args+=(--setenv CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN")
+[[ -n "${COPILOT_PROVIDER_BASE_URL:-}" ]] && bwrap_args+=(--setenv COPILOT_PROVIDER_BASE_URL "$COPILOT_PROVIDER_BASE_URL")
+[[ -n "${COPILOT_PROVIDER_TYPE:-}" ]] && bwrap_args+=(--setenv COPILOT_PROVIDER_TYPE "$COPILOT_PROVIDER_TYPE")
+[[ -n "${COPILOT_PROVIDER_API_KEY:-}" ]] && bwrap_args+=(--setenv COPILOT_PROVIDER_API_KEY "$COPILOT_PROVIDER_API_KEY")
+[[ -n "${COPILOT_MODEL:-}" ]] && bwrap_args+=(--setenv COPILOT_MODEL "$COPILOT_MODEL")
 
 build_ai_argv
 exec bwrap "${bwrap_args[@]}" "${AI_ARGV[@]}"
@@ -923,6 +966,33 @@ show_agy_log_errors() {
     printf '%s\n' "$errs" | sed 's/^/    /' >&2
 }
 
+# BYOK (e.g. OpenRouter) provider errors are the trickiest to diagnose: the
+# HTTP status code Copilot surfaces is often generic/misleading (e.g. it
+# reported "403" for what OpenRouter's own JSON body called a 402 insufficient-
+# credits error), and the real reason only shows up in the provider's response
+# body, not in Copilot's own log. Recognize this class of failure from the
+# transcript and point straight at the likely cause + a way to self-check.
+diagnose_provider_error() {
+    [[ -n "${COPILOT_PROVIDER_BASE_URL:-}" ]] || return 0
+    grep -qiE 'authentication failed with provider|HTTP 40[0-9]' "$LOG" 2>/dev/null || return 0
+    warn "This looks like a BYOK provider error ($COPILOT_PROVIDER_BASE_URL, model $AI_MODEL)."
+    if grep -qiE 'HTTP 402|insufficient credit' "$LOG"; then
+        warn "  → Insufficient credits on that provider account. Add credits, or use a
+     free-tier model (often suffixed ':free'): https://openrouter.ai/settings/credits"
+    elif grep -qiE 'HTTP 401|invalid.*api.?key|unauthorized' "$LOG"; then
+        warn "  → The stored key looks invalid or revoked. Re-store it:
+     keyring set $OPENROUTER_KEYRING_SERVICE $OPENROUTER_KEYRING_ACCOUNT"
+    else
+        warn "  → The reported HTTP code alone can be misleading (a real case here was
+     a 403 that was actually a 402 insufficient-credits error underneath).
+     Check the key directly against the provider to see its real error body:
+       curl -s ${COPILOT_PROVIDER_BASE_URL%/}/chat/completions \\
+         -H \"Authorization: Bearer \$(keyring get $OPENROUTER_KEYRING_SERVICE $OPENROUTER_KEYRING_ACCOUNT)\" \\
+         -H 'Content-Type: application/json' \\
+         -d '{\"model\":\"$AI_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'"
+    fi
+}
+
 echo
 # Match loosely (case-insensitive, no line-start anchor): providers sometimes
 # wrap the requested plain-text line in markdown decoration (e.g. '**SUMMARY:**'
@@ -931,6 +1001,7 @@ if grep -qi 'SUMMARY:' "$LOG" 2>/dev/null; then
     printf '%s\n' "${GREEN}✔ Done!${RESET}"
     grep -i 'SUMMARY:' "$LOG" | sed "s/^/  ${GREEN}/; s/\$/${RESET}/"
 elif [[ "$status" -ne 0 ]]; then
+    diagnose_provider_error
     show_agy_log_errors
     die "The AI agent exited with an error (code $status). See the output above."
 else

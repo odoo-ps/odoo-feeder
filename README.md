@@ -48,6 +48,29 @@ are always asked separately and never belong in a template.
 The prompts use [`gum`](https://github.com/charmbracelet/gum) for a nicer interface
 when it is available, and fall back to plain prompts otherwise.
 
+## AI CLI providers
+
+By default the feeder drives [`agy`](https://antigravity.google) (Antigravity). Pass
+`--ai-cli copilot` (GitHub Copilot CLI) or `--ai-cli claude` (Claude Code) to use a
+different one.
+
+`copilot` can also be routed through [OpenRouter](https://openrouter.ai) instead of
+GitHub's own model routing, via Copilot's BYOK support. The API key is never passed
+as a flag or plaintext env var — store it once in the OS keyring:
+
+```bash
+keyring set odoo-feeder openrouter-api-key
+```
+
+then run with:
+
+```bash
+odoo-demo-feeder --ai-cli copilot --openrouter-model anthropic/claude-sonnet-4.5 ...
+```
+
+(`OPENROUTER_MODEL` env var works the same way.) No GitHub sign-in is required once
+OpenRouter is active.
+
 ## What's inside
 
 - **feed.sh** — one-shot bootstrap (provision + launch).

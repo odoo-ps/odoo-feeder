@@ -25,6 +25,9 @@ REPO_REF="${REPO_REF:-main}"
 # Which AI CLI drives the agent: "agy" (Antigravity, default), "copilot"
 # (GitHub Copilot CLI) or "claude" (Claude Code).
 AI_CLI="${AI_CLI:-agy}"
+# OpenRouter BYOK, 'copilot' only (see odoo-demo-feeder --help). Its presence
+# here just tells the sign-in probe below that no GitHub login is needed.
+OPENROUTER_MODEL="${OPENROUTER_MODEL:-}"
 RAW="https://raw.githubusercontent.com/${REPO}/${REPO_REF}"
 BIN_DIR="$HOME/.local/bin"
 DATA_DIR="$HOME/.local/share/odoo-demo-feeder"
@@ -227,6 +230,7 @@ provider_signed_in() {
             fi
             ;;
         copilot)
+            [[ -n "$OPENROUTER_MODEL" ]] && return 0   # BYOK (e.g. OpenRouter) — no GitHub auth needed
             [[ -n "${COPILOT_GITHUB_TOKEN:-}" || -n "${GH_TOKEN:-}" || -n "${GITHUB_TOKEN:-}" ]] && return 0
             if command -v timeout >/dev/null 2>&1; then
                 timeout 30 "$bin" -p ping --allow-all-tools -s --model auto >/dev/null 2>&1
@@ -244,7 +248,7 @@ provider_signed_in() {
 # --------------------------------------------------------------------------- #
 step "Checking sign-in"
 # --------------------------------------------------------------------------- #
-if [[ -n "${ANTIGRAVITY_TOKEN:-}${COPILOT_GITHUB_TOKEN:-}${GH_TOKEN:-}${GITHUB_TOKEN:-}${ANTHROPIC_API_KEY:-}${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+if [[ -n "${ANTIGRAVITY_TOKEN:-}${COPILOT_GITHUB_TOKEN:-}${GH_TOKEN:-}${GITHUB_TOKEN:-}${ANTHROPIC_API_KEY:-}${CLAUDE_CODE_OAUTH_TOKEN:-}${OPENROUTER_MODEL:-}" ]]; then
     ok "Using an auth token from the environment (unattended)"
 elif provider_signed_in; then
     ok "Already signed in"
