@@ -227,14 +227,19 @@ def cmd_set_image(args):
     field = args.field or "image_1920"
     if args.url:
         import urllib.request
+        url = args.url
+        if url.startswith("//"):
+            # Protocol-relative URL (common on Shopify/Sapo storefronts) —
+            # urllib refuses these outright, so assume https.
+            url = "https:" + url
         try:
             req = urllib.request.Request(
-                args.url, headers={"User-Agent": "odoo-demo-feeder"}
+                url, headers={"User-Agent": "odoo-demo-feeder"}
             )
             with urllib.request.urlopen(req, timeout=30) as resp:
                 raw = resp.read()
         except Exception as exc:  # noqa: BLE001
-            fail(f"Could not download image from {args.url}: {exc}")
+            fail(f"Could not download image from {url}: {exc}")
     elif args.file:
         try:
             with open(args.file, "rb") as handle:

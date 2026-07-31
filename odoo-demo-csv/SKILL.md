@@ -112,7 +112,9 @@ etc.), generate them too, keeping the same relational logic.
 
 Use **real** images you find while researching the site — never generate images.
 While reading the website, collect the URLs of the company logo and of product
-photos. After a record is created, set its picture with:
+photos. Make sure each URL is absolute (starts with `https://` — some sites
+emit protocol-relative URLs like `//cdn.example.com/...`; prefix those with
+`https:`). After a record is created, set its picture with:
 
 `odoo-crud set-image <model> --id <record_id> --url <image_url>`
 
