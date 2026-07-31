@@ -50,7 +50,10 @@ Work in this order:
      `odoo-crud models --filter crm` and `odoo-crud fields crm.lead`.
 2. **Configure the company** from your research: set the country, company name and currency on
    `res.company` to match the company's real location (find the id with
-   `search-read`, then `call res.company write`).
+   `search-read`, then `odoo-crud write res.company --ids '[1]' --values
+   '{"country_id": 241, "currency_id": 23}'` — use the dedicated `write`
+   command, not `call ... write`, which needs a much easier-to-get-wrong nested
+   `--args '[[ids], {values}]'` shape).
 3. **Generate & import** each CSV: write it to a file (e.g. `res_partner.csv`),
    then `odoo-crud import-csv <model> --file <path>`.
 4. If an import reports errors, diagnose with
@@ -108,7 +111,7 @@ Keep the whole dataset internally consistent and proportional to the chosen size
    (never a made-up or renamed one), then import.
 4. **crm.lead** — leads scaled per the size section.
    Columns: `id` (e.g. `lead_1`), `name`, `partner_id/id` (reuse an id from file 1),
-   `expected_revenue`, `stage_id` (value: `New`, `Qualified`, or `Proposition`).
+   `expected_revenue`, `description`, `stage_id` (value: `New`, `Qualified`, or `Proposition`).
 
 If the sales person asks for extra files (`mrp.bom`, employees, chart of accounts,
 etc.), generate them too, keeping the same relational logic.

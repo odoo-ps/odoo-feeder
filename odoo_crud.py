@@ -152,7 +152,11 @@ def cmd_search_read(args):
 def cmd_create(args):
     values = parse_json(args.values, "--values")
     if values is None:
-        fail("--values is required (a JSON object).")
+        fail("--values is required (a JSON object, or a JSON array of objects to batch-create).")
+    # Odoo's create() natively batches: a JSON array of objects creates every
+    # record in one call instead of one round-trip per record.
+    if not isinstance(values, list):
+        values = [values]
     ok(execute(args.model, "create", [values]))
 
 
@@ -410,9 +414,15 @@ def build_parser():
     p.add_argument("--fields", help="JSON list of field names.")
     p.add_argument("--limit", type=int)
 
-    p = sub.add_parser("create", help="Create a record.")
+    p = sub.add_parser("create", help="Create one or more records (batch: pass a JSON array).")
     p.add_argument("model")
-    p.add_argument("--values", required=True, help="JSON object of field values.")
+    p.add_argument(
+        "--values", required=True,
+        help="JSON object of field values for one record, OR a JSON array of "
+             "objects to create many records in a single call — e.g. "
+             "'[{\"name\": \"A\"}, {\"name\": \"B\"}]'. Prefer batching over "
+             "one create call per record.",
+    )
 
     p = sub.add_parser("write", help="Update records.")
     p.add_argument("model")
@@ -423,10 +433,19 @@ def build_parser():
     p.add_argument("model")
     p.add_argument("--ids", required=True, help="JSON list of ids.")
 
-    p = sub.add_parser("call", help="Call an arbitrary model method.")
+    p = sub.add_parser(
+        "call",
+        help="Call an arbitrary model method (prefer create/write/unlink/"
+             "search-read when they fit — this is for anything else).",
+        description="Call an arbitrary model method. --args is the method's "
+                     "FULL positional argument list as ONE JSON array — e.g. "
+                     "for write(ids, values) pass "
+                     "--args '[[1], {\"name\": \"X\"}]', not --ids/--values "
+                     "(those belong to the dedicated write command instead).",
+    )
     p.add_argument("model")
     p.add_argument("method")
-    p.add_argument("--args", help="JSON list of positional args.")
+    p.add_argument("--args", help="JSON array of ALL positional args, e.g. '[[1], {\"name\": \"X\"}]' for write.")
     p.add_argument("--kwargs", help="JSON object of keyword args.")
 
     p = sub.add_parser("models", help="List models (introspection).")
