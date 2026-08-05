@@ -220,9 +220,68 @@ def cmd_models(args):
     ok(result)
 
 
+_COMPACT_ATTRS = ["string", "type", "required", "readonly", "store",
+                  "relation", "selection"]
+
+
+def _compact_field(info):
+    """One line per field: type, flags, target model, selection values."""
+    parts = [info.get("type") or "?"]
+    if info.get("required"):
+        parts.append("required")
+    if info.get("readonly"):
+        parts.append("readonly")
+    if not info.get("store", True):
+        parts.append("not-stored")
+    if info.get("relation"):
+        parts.append(f"-> {info['relation']}")
+    selection = info.get("selection")
+    if selection:
+        values = [str(pair[0]) for pair in selection
+                  if isinstance(pair, (list, tuple)) and pair]
+        shown = "|".join(values[:12])
+        if len(values) > 12:
+            shown += f"|+{len(values) - 12} more"
+        parts.append(f"= {shown}")
+    return " ".join(parts)
+
+
 def cmd_fields(args):
-    attrs = ["string", "type", "required", "relation", "selection", "help"]
-    ok(execute(args.model, "fields_get", [], {"attributes": attrs}))
+    """Describe a model's fields (introspection).
+
+    A raw fields_get is enormous — a few hundred fields on res.partner, each
+    carrying a multi-sentence 'help' — and every byte of it lands in the agent's
+    context and is re-sent on every following turn, which costs far more than
+    the data being imported. So the default is one compact line per field
+    ("many2one required -> res.partner"), which is all that is needed to write a
+    CSV. --filter narrows to a name or label substring; --full returns the raw
+    fields_get, help text included, when the description really is needed.
+    """
+    if args.full:
+        ok(execute(args.model, "fields_get", [],
+                   {"attributes": _COMPACT_ATTRS + ["help"]}))
+
+    meta = execute(args.model, "fields_get", [], {"attributes": _COMPACT_ATTRS})
+    names = sorted(meta)
+    if args.filter:
+        needle = args.filter.lower()
+        names = [
+            name for name in names
+            if needle in name.lower()
+            or needle in str(meta[name].get("string") or "").lower()
+        ]
+    result = {
+        "model": args.model,
+        "total_fields": len(meta),
+        "shown": len(names),
+        "fields": {name: _compact_field(meta[name]) for name in names},
+    }
+    if not args.filter and len(meta) > 60:
+        result["hint"] = (
+            f"{len(meta)} fields. Narrow the next lookup with "
+            f"'odoo-crud fields {args.model} --filter <text>'."
+        )
+    ok(result)
 
 
 def _disable_demo_data():
@@ -481,8 +540,22 @@ def build_parser():
     p = sub.add_parser("models", help="List models (introspection).")
     p.add_argument("--filter", help="Substring to filter the technical name.")
 
-    p = sub.add_parser("fields", help="Describe a model's fields (introspection).")
+    p = sub.add_parser(
+        "fields",
+        help="Describe a model's fields, one compact line each (introspection).",
+    )
     p.add_argument("model")
+    p.add_argument(
+        "--filter",
+        help="Only fields whose technical name or label contains this text. "
+             "Use it on big models (res.partner, product.template) instead of "
+             "dumping every field.",
+    )
+    p.add_argument(
+        "--full", action="store_true",
+        help="Raw fields_get including every help text — very verbose, only "
+             "when a field's description is genuinely needed.",
+    )
 
     p = sub.add_parser(
         "install-modules",

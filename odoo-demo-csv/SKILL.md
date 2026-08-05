@@ -48,6 +48,10 @@ Work in this order:
    - Confirm each target model and its fields exist, and adapt your CSV columns to
      what this database/version actually has:
      `odoo-crud models --filter crm` and `odoo-crud fields crm.lead`.
+     `fields` prints one compact line per field (`many2one required -> res.partner`).
+     On big models (`res.partner`, `product.template`) narrow it —
+     `odoo-crud fields res.partner --filter address` — instead of dumping every
+     field; only add `--full` if you genuinely need a field's help text.
 2. **Configure the company** from your research: set the country, company name and currency on
    `res.company` to match the company's real location (find the id with
    `search-read`, then `odoo-crud write res.company --ids '[1]' --values
