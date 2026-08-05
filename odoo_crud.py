@@ -10,6 +10,11 @@ Environment variables (set by the launcher):
     ODOO_LOGIN    the user login (often an email)
     ODOO_SECRET   the API key or password
 
+Optional:
+    ODOO_DB              database name, when it is not the URL's first label
+    ODOO_CRUD_SESSION    where the authenticated uid is cached between
+                         processes; set it empty to authenticate every time
+
 Every command prints a single JSON object to stdout:
     {"ok": true,  "result": <data>}
     {"ok": false, "error": "<message>"}
@@ -19,9 +24,11 @@ machine-readable feedback it can reason about (e.g. to debug a failing import).
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
+import tempfile
 import xmlrpc.client
 
 
@@ -37,6 +44,18 @@ def ok(result):
     sys.exit(0)
 
 
+def fail_result(result):
+    """Print a structured failure payload and exit non-zero.
+
+    Same shape as ok(), but ok=false and exit 1. Used where the failure has more
+    to say than one error string — a rolled-back import carries per-row
+    messages. Reporting those through ok() made a failed import indistinguishable
+    from a successful one to anything reading the exit code.
+    """
+    print(json.dumps({"ok": False, "result": result}, default=str))
+    sys.exit(1)
+
+
 def get_config():
     url = (os.environ.get("ODOO_URL") or "").rstrip("/")
     login = os.environ.get("ODOO_LOGIN") or ""
@@ -47,44 +66,134 @@ def get_config():
 
 
 _CONNECTION = None
+_FROM_SESSION = False
+
+
+def _session_path():
+    """Where the uid is cached between processes, or None if disabled.
+
+    ODOO_CRUD_SESSION overrides the location; set it empty to turn the cache
+    off. Defaults under XDG_CACHE_HOME, which the sandbox binds read-write.
+    """
+    if "ODOO_CRUD_SESSION" in os.environ:
+        return os.environ["ODOO_CRUD_SESSION"] or None
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache"
+    )
+    return os.path.join(base, "odoo-crud", "session.json")
+
+
+def _fingerprint(url, db, login, secret):
+    """Identify the credentials a cached uid belongs to, without storing them.
+
+    The secret is in there so that rotating the API key misses the cache
+    instead of replaying a uid the new key never earned.
+    """
+    material = "\0".join((url, db, login, secret)).encode()
+    return hashlib.sha256(material).hexdigest()[:32]
+
+
+def _load_session(fingerprint):
+    path = _session_path()
+    if not path:
+        return None
+    try:
+        with open(path) as handle:
+            data = json.load(handle)
+    except Exception:  # noqa: BLE001 - a missing or corrupt cache is just a miss
+        return None
+    if not isinstance(data, dict) or data.get("fingerprint") != fingerprint:
+        return None
+    uid = data.get("uid")
+    return (uid, data.get("version")) if isinstance(uid, int) and uid else None
+
+
+def _save_session(fingerprint, uid, version):
+    path = _session_path()
+    if not path:
+        return
+    payload = {"fingerprint": fingerprint, "uid": uid, "version": version}
+    directory = os.path.dirname(os.path.abspath(path))
+    try:
+        os.makedirs(directory, exist_ok=True)
+        # Written whole-then-renamed: two odoo-crud processes can overlap, and a
+        # half-written file would be read back as a corrupt cache.
+        handle, tmp = tempfile.mkstemp(dir=directory)
+        with os.fdopen(handle, "w") as stream:
+            json.dump(payload, stream)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001 - caching is an optimisation, never fatal
+        pass
+
+
+def _forget_session():
+    global _FROM_SESSION
+    _FROM_SESSION = False
+    path = _session_path()
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def connect(force=False):
     """Authenticate and return (uid, models_proxy, url, db, login, secret, version).
 
-    Memoized for the life of the process. Authenticating once per RPC cost two
-    extra round trips (version + authenticate) on every call — install-modules
-    alone paid that five times. XML-RPC is stateless per request, so the uid and
-    the proxies stay valid for the whole run; reusing the ServerProxy also keeps
-    its HTTP connection alive between calls, which saves the TLS handshake too.
+    Memoized for the life of the process, and the uid is cached on disk between
+    processes. Authenticating once per RPC cost two extra round trips (version +
+    authenticate) on every call — install-modules alone paid that five times.
+    XML-RPC is stateless per request, so the uid and the proxies stay valid for
+    the whole run; reusing the ServerProxy also keeps its HTTP connection alive
+    between calls, which saves the TLS handshake too.
 
-    Pass force=True to drop the cached connection and authenticate again (see
-    execute(), which does that once if the kept-alive socket has gone stale).
+    The on-disk half matters because the agent gets one process per odoo-crud
+    invocation, so in-process memoization alone still left a full login — and
+    Odoo hashes the password on every authenticate(), around half a second — in
+    front of every single command. execute_kw's own credential check is cached
+    server-side, so replaying a known uid skips the login entirely.
+
+    Pass force=True to drop both caches and authenticate again (see execute(),
+    which does that if the kept-alive socket has gone stale or the server
+    rejects the replayed uid).
     """
-    global _CONNECTION
+    global _CONNECTION, _FROM_SESSION
     if _CONNECTION is not None and not force:
         return _CONNECTION
     _CONNECTION = None
+    _FROM_SESSION = False
 
     url, login, secret = get_config()
-    common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common", allow_none=True)
-    try:
-        version = common.version()
-    except Exception as exc:  # noqa: BLE001 - report any transport error verbatim
-        fail(f"Cannot reach Odoo at {url}: {exc}")
-
     # The database name is usually the host's first label for SaaS, but it can
     # be set explicitly via ODOO_DB. authenticate() needs a db name.
     db = os.environ.get("ODOO_DB") or _guess_db(url)
-    try:
-        uid = common.authenticate(db, login, secret, {})
-    except Exception as exc:  # noqa: BLE001
-        fail(f"Authentication call failed: {exc}")
-    if not uid:
-        fail(
-            "Authentication failed: wrong login/API key, or wrong database "
-            f"name '{db}'. Set ODOO_DB if the database name differs from the host."
+    fingerprint = _fingerprint(url, db, login, secret)
+
+    cached = None if force else _load_session(fingerprint)
+    if cached:
+        uid, version = cached
+        _FROM_SESSION = True
+    else:
+        common = xmlrpc.client.ServerProxy(
+            f"{url}/xmlrpc/2/common", allow_none=True
         )
+        try:
+            version = common.version()
+        except Exception as exc:  # noqa: BLE001 - report transport errors verbatim
+            fail(f"Cannot reach Odoo at {url}: {exc}")
+        try:
+            uid = common.authenticate(db, login, secret, {})
+        except Exception as exc:  # noqa: BLE001
+            fail(f"Authentication call failed: {exc}")
+        if not uid:
+            fail(
+                "Authentication failed: wrong login/API key, or wrong database "
+                f"name '{db}'. Set ODOO_DB if the database name differs from the host."
+            )
+        _save_session(fingerprint, uid, version)
+
     models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object", allow_none=True)
     _CONNECTION = (uid, models, url, db, login, secret, version)
     return _CONNECTION
@@ -96,7 +205,32 @@ def _guess_db(url):
     return host.split(".", 1)[0]
 
 
+def _stale_uid(fault, uid):
+    """Does this Fault say the acting uid itself is no longer valid?
+
+    Two shapes, depending on what happened to the user behind a cached uid:
+    a wrong password for an existing one raises AccessDenied, a deleted one
+    (database rebuilt underneath us) raises MissingError naming res.users. The
+    res.users(uid,) match is what keeps this from swallowing an ordinary
+    MissingError about the records the command was actually working on.
+    """
+    text = str(fault.faultString)
+    return "access denied" in text.lower() or f"res.users({uid}," in text
+
+
+_CONTEXT = {}
+
+
 def execute(model, method, args=None, kwargs=None):
+    # The --context flag rides on every call made by this process. Odoo behaviour
+    # that is only reachable through the context was simply unreachable through
+    # this tool before: chiefly 'active_test', without which search-read hides
+    # every archived record, so the inactive currency the demo actually needs
+    # reads as "does not exist in this database".
+    kwargs = dict(kwargs or {})
+    if _CONTEXT and "context" not in kwargs:
+        kwargs["context"] = _CONTEXT
+
     # Two attempts: the connection is now reused across calls, so its kept-alive
     # socket can go cold when the server reloads its registry (which is exactly
     # what button_immediate_install does). xmlrpc's own Transport already
@@ -108,9 +242,17 @@ def execute(model, method, args=None, kwargs=None):
         uid, models, _url, db, _login, secret, _version = connect(force=bool(attempt))
         try:
             return models.execute_kw(
-                db, uid, secret, model, method, args or [], kwargs or {}
+                db, uid, secret, model, method, args or [], kwargs
             )
         except xmlrpc.client.Fault as fault:
+            # One kind of Fault is not an application error: a uid replayed from
+            # the session cache that the server no longer accepts. Drop the
+            # cache and earn a fresh uid before believing it. Retrying is safe
+            # precisely because these are raised by the credential check, before
+            # the method itself runs — so the first attempt wrote nothing.
+            if attempt == 0 and _FROM_SESSION and _stale_uid(fault, uid):
+                _forget_session()
+                continue
             fail(f"Odoo error in {model}.{method}: {fault.faultString}")
         except Exception as exc:  # noqa: BLE001
             if attempt == 0:
@@ -131,7 +273,10 @@ def parse_json(value, what):
 # Commands
 # --------------------------------------------------------------------------- #
 def cmd_auth_check(_args):
-    uid, _models, url, db, login, _secret, version = connect()
+    # The one command whose job is to prove the credentials work, so it always
+    # logs in for real rather than trusting a cached uid — and, being the first
+    # command of the run, it is what fills the cache for every command after it.
+    uid, _models, url, db, login, _secret, version = connect(force=True)
     ok({"uid": uid, "url": url, "database": db, "login": login, "version": version})
 
 
@@ -264,11 +409,16 @@ def cmd_fields(args):
     meta = execute(args.model, "fields_get", [], {"attributes": _COMPACT_ATTRS})
     names = sorted(meta)
     if args.filter:
-        needle = args.filter.lower()
+        # Comma-separated: asking for several named fields at once is the common
+        # case ('name,list_price,barcode'), and treating that as one literal
+        # substring matched nothing — which sent the caller back to dumping every
+        # field, the exact output this command exists to avoid.
+        needles = [part.strip().lower() for part in args.filter.split(",") if part.strip()]
         names = [
             name for name in names
-            if needle in name.lower()
-            or needle in str(meta[name].get("string") or "").lower()
+            if any(needle in name.lower()
+                   or needle in str(meta[name].get("string") or "").lower()
+                   for needle in needles)
         ]
     result = {
         "model": args.model,
@@ -447,6 +597,32 @@ def cmd_import_preview(args):
 _REQUIRED_ATTRS = ["type", "required", "readonly", "store"]
 
 
+def _unknown_columns(meta, headers):
+    """CSV columns that map to no field, each paired with a near-miss hint.
+
+    Returns [(column, " (did you mean 'x'?)"), ...] — the suggestion comes from
+    the model's real field names, which is usually enough to fix the CSV without
+    another round trip.
+    """
+    import difflib
+
+    unknown = []
+    for header in headers:
+        base = _field_base(header)
+        if base == "id" or base in meta:
+            continue
+        close = difflib.get_close_matches(base, meta, n=1, cutoff=0.6)
+        if not close:
+            # A renamed field often keeps the old name as a substring
+            # ('detailed_type' -> 'type'), which scores too low for difflib but
+            # is exactly the suggestion worth making. Shortest match wins, so
+            # 'type' is preferred over 'service_tracking_type'.
+            contained = sorted((f for f in meta if f in base or base in f), key=len)
+            close = contained[:1]
+        unknown.append((header, f" (did you mean '{close[0]}'?)" if close else ""))
+    return unknown
+
+
 def _missing_required_fields(model, meta, headers):
     """Model fields that genuinely have to come from the CSV but are absent.
 
@@ -487,6 +663,19 @@ def cmd_import_csv(args):
     fields = parse_json(args.fields, "--fields") or headers
 
     meta = execute(args.model, "fields_get", [], {"attributes": _REQUIRED_ATTRS})
+
+    # Reject columns the model does not have *before* load() runs. Otherwise a
+    # single stale field name (detailed_type, renamed in Odoo 18) costs a failed
+    # import plus a full fields_get dump to work out which column was wrong.
+    unknown = _unknown_columns(meta, fields)
+    if unknown:
+        fail(
+            f"CSV for {args.model} has column(s) that are not fields of the "
+            f"model: {', '.join(f'{col}{hint}' for col, hint in unknown)}. "
+            f"Check 'odoo-crud fields {args.model} --filter <text>' for the "
+            "exact names — nothing was imported."
+        )
+
     missing_required = _missing_required_fields(args.model, meta, fields)
     if missing_required:
         fail(
@@ -503,10 +692,20 @@ def cmd_import_csv(args):
     messages = result.get("messages", []) if isinstance(result, dict) else []
     ids = result.get("ids") if isinstance(result, dict) else result
     if messages:
-        ok({"status": "failed", "messages": messages,
-            "imported": 0, "fields_used": fields})
+        fail_result({"status": "failed", "messages": messages,
+                     "imported": 0, "fields_used": fields})
     ok({"status": "imported", "imported": len(ids or []),
         "ids": ids, "fields_used": fields})
+
+
+def _add_context_arg(parser):
+    parser.add_argument(
+        "--context",
+        help="JSON object merged into the Odoo context for this call. Mainly "
+             "'{\"active_test\": false}', which also returns archived records — "
+             "most currencies ship inactive, so without it a perfectly real "
+             "currency looks like it does not exist.",
+    )
 
 
 def build_parser():
@@ -523,6 +722,7 @@ def build_parser():
     p.add_argument("--domain", help="JSON list, e.g. '[[\"name\",\"=\",\"X\"]]'")
     p.add_argument("--fields", help="JSON list of field names.")
     p.add_argument("--limit", type=int)
+    _add_context_arg(p)
 
     p = sub.add_parser("create", help="Create one or more records (batch: pass a JSON array).")
     p.add_argument("model")
@@ -533,15 +733,18 @@ def build_parser():
              "'[{\"name\": \"A\"}, {\"name\": \"B\"}]'. Prefer batching over "
              "one create call per record.",
     )
+    _add_context_arg(p)
 
     p = sub.add_parser("write", help="Update records.")
     p.add_argument("model")
     p.add_argument("--ids", required=True, help="JSON list of ids.")
     p.add_argument("--values", required=True, help="JSON object of field values.")
+    _add_context_arg(p)
 
     p = sub.add_parser("unlink", help="Delete records.")
     p.add_argument("model")
     p.add_argument("--ids", required=True, help="JSON list of ids.")
+    _add_context_arg(p)
 
     p = sub.add_parser(
         "call",
@@ -557,6 +760,7 @@ def build_parser():
     p.add_argument("method")
     p.add_argument("--args", help="JSON array of ALL positional args, e.g. '[[1], {\"name\": \"X\"}]' for write.")
     p.add_argument("--kwargs", help="JSON object of keyword args.")
+    _add_context_arg(p)
 
     p = sub.add_parser("models", help="List models (introspection).")
     p.add_argument("--filter", help="Substring to filter the technical name.")
@@ -569,8 +773,9 @@ def build_parser():
     p.add_argument(
         "--filter",
         help="Only fields whose technical name or label contains this text. "
-             "Use it on big models (res.partner, product.template) instead of "
-             "dumping every field.",
+             "Accepts a comma-separated list to look up several at once, e.g. "
+             "--filter 'name,list_price,barcode'. Use it on big models "
+             "(res.partner, product.template) instead of dumping every field.",
     )
     p.add_argument(
         "--full", action="store_true",
@@ -602,6 +807,7 @@ def build_parser():
     p.add_argument("model")
     p.add_argument("--file", required=True)
     p.add_argument("--fields", help="JSON list mapping each column to a field.")
+    _add_context_arg(p)
 
     return parser
 
@@ -623,7 +829,13 @@ HANDLERS = {
 
 
 def main():
+    global _CONTEXT
     args = build_parser().parse_args()
+    context = parse_json(getattr(args, "context", None), "--context")
+    if context is not None:
+        if not isinstance(context, dict):
+            fail("--context must be a JSON object, e.g. '{\"inventory_mode\": true}'.")
+        _CONTEXT = context
     HANDLERS[args.command](args)
 
 

@@ -609,71 +609,40 @@ Any other key or free text: follow it as an instruction.
 ${TEMPLATE_TEXT}
 ===== END TEMPLATE ====="
     SIZE_DIRECTIVE=""
-    INSTALL_HINT="install EXACTLY the apps listed in the template (mapped to their
-   technical module names, with dependencies) in ONE call, e.g.
-   'install-modules sale_management crm website ...'"
 elif [[ -n "$COMPANY_SITE" || -n "$COMPANY_NAME" ]]; then
     TARGET_DESC="Build the data for this real company (research its website first):
   Company: ${COMPANY_NAME:-(name not given)}
   Website: ${COMPANY_SITE:-(website not given)}
   Industry / scope: ${ODOO_SCOPE}"
-    SIZE_DIRECTIVE="Target dataset size: ${ODOO_SIZE}. Apply this size consistently to EVERY model you
-populate, using the anchor + ratios in the skill's 'Dataset size' section — do not
-guess the volume, and don't leave some models tiny while others are large.
+    SIZE_DIRECTIVE="Target dataset size: ${ODOO_SIZE} — turn it into per-model counts with the
+anchor + ratios in the skill's 'Dataset size' section.
 
 "
-    INSTALL_HINT="install every module you need
-   in ONE call: 'install-modules crm stock sale_management account'"
 else
     TARGET_DESC="No specific customer was given — generate coherent, generic demo
 data for the \"${ODOO_SCOPE}\" industry."
-    SIZE_DIRECTIVE="Target dataset size: ${ODOO_SIZE}. Apply this size consistently to EVERY model you
-populate, using the anchor + ratios in the skill's 'Dataset size' section — do not
-guess the volume, and don't leave some models tiny while others are large.
+    SIZE_DIRECTIVE="Target dataset size: ${ODOO_SIZE} — turn it into per-model counts with the
+anchor + ratios in the skill's 'Dataset size' section.
 
 "
-    INSTALL_HINT="install every module you need
-   in ONE call: 'install-modules crm stock sale_management account'"
 fi
 
 REQUEST="You are populating an Odoo demo database for a sales demo.
 
-Follow the 'odoo-demo-csv' skill: research the target, generate Odoo-import-ready
-CSV files, and import them into the connected database.
+Follow the 'odoo-demo-csv' skill end to end — it defines the whole run and how to
+narrate it.
 
 ${SIZE_DIRECTIVE}${TARGET_DESC}
 
-Use ONLY this tool for every database operation (it reads the credentials from
-environment variables, so never ask for them). Wherever the skill mentions
-CRUD_TOOL, run:
+Wherever the skill says 'odoo-crud', run:
 
     odoo-crud <command> [options]
 
-This is the ONLY shell command you are permitted to run — other commands are
-blocked. It can read and write files in the current directory and fetch web
-pages for research.
+This is the ONLY shell command you are permitted to run — everything else is
+blocked. It reads the database credentials from environment variables, so never
+ask for them, and 'odoo-crud <command> --help' documents every command and flag.
+Write your CSV files in the current directory.
 
-Available commands: auth-check | search-read | create | write | unlink | call |
-models | fields | import-preview | import-csv. Each prints JSON
-{\"ok\": true|false, ...} so you can check results and recover from errors.
-
-Be verbose: announce each step before doing it and print a one-line result after
-each command, so the person watching sees clear progress.
-
-Every command is synchronous — never wait or pause for an operation to finish.
-To install modules, use ONE call: 'odoo-crud install-modules <names...>' — it
-installs AND confirms the modules before returning, so there is nothing to wait
-for. Work in one continuous pass and only stop after you print the SUMMARY line.
-
-Steps:
-1. Run auth-check first and stop with a clear message if it fails.
-2. Inspect the database ('models', 'fields'), then ${INSTALL_HINT} (it installs
-   and confirms before returning — do not wait). Configure the company's
-   country/currency from your research.
-3. Generate the CSV files defined by the skill, write each to a file in the
-   current directory, and import them in dependency order with 'import-csv'.
-4. If an import fails, use 'import-preview', 'fields' and 'models' to find out
-   why, fix the CSV, and retry.
 Finish by printing one line, in plain text with no markdown formatting (no
 bullets, bold, or headers), that starts with exactly 'SUMMARY:' describing what
 you created."

@@ -1,150 +1,181 @@
 ---
 name: odoo-demo-csv
 description: >
-  Research a prospect's company website and generate Odoo-import-ready CSV files
-  (customers/vendors, products, stock, CRM leads), then import them into the
-  connected Odoo database with strict external-ID and CSV-safety rules. Use
-  whenever populating an Odoo demo database from a real company or industry.
+  Populate a connected Odoo demo database with data researched from a real
+  company's website, or from a named industry. Use whenever a sales demo needs a
+  database filled with realistic records.
 ---
 
-# Odoo Demo Data — website-driven CSV generation
+# Odoo demo data
 
-## Context & method
+A sales person names a company and its website — or just an industry — plus a
+dataset size. You research the target, write Odoo-import-ready CSVs, import them
+into the connected database, and verify the result: one continuous pass ending
+with a `SUMMARY:` line.
 
-The sales person gives you a company name and its website (and may ask for
-additional files).
+Two words govern every step below.
 
-1. **Research first.** Use your web search / browsing tools to analyze the site:
-   understand the sector, find the *real* products/services, and identify the
-   location (for currency and address). If no website is given, generate coherent
-   generic data for the provided industry/scope instead.
-2. **Then generate** the Odoo-import-ready CSV files described below.
+**Ground truth** — every record traces back to something you found on the target
+site: real product names, real prices, real photos. Where the site is silent,
+stay silent — price `0.00`, no image, and one line saying the data was thin. A
+demo built on invented products is the one failure this run cannot recover from.
 
-## How to run in this environment (important)
+**Narrate** — one line before each step saying what you are about to do, one line
+after each `odoo-crud` call carrying its result ("Imported 25 partners",
+"Preview found 1 bad column, fixing"). The sales person watches this output and
+sees nothing else of the run.
 
-You run **headless** with a single tool, `odoo-crud` (the only shell command you
-may run). Do **not** just print CSV code blocks — write files and import them.
+## The tool
 
-**Be verbose.** Before each step, say what you are about to do; after each
-`odoo-crud` call, print a one-line result (e.g. "Installing crm… done", "Imported
-5 partners", "Preview found 1 bad column, fixing"). The sales person is watching
-this output, so narrate your progress.
+`odoo-crud <command> [options]` reaches Odoo over XML-RPC. It is the only shell
+command available to you, and it reads its credentials from the environment.
 
-**Never wait or pause.** Every `odoo-crud` call is synchronous — when it returns,
-the operation is done. Do not "wait for it to finish". Run the whole job in one
-continuous pass and only stop once you have printed the final `SUMMARY:` line.
+- **Blocking** — every call, `install-modules` included, returns once the work is
+  done. Chain straight into the next command: there is nothing to wait for and
+  nothing to poll.
+- Every call prints JSON `{"ok": true|false, ...}`. Read `ok` before moving on.
+- `odoo-crud <command> --help` is the flag reference: the exact JSON shape of
+  `--domain`, `--values`, `--args`, `--context`, `--filter` lives there. Read it
+  rather than guess a shape.
 
-Work in this order:
+Use your own file tools to write the CSVs and your browsing tools to research —
+writing CSV into the chat instead of into a file imports nothing.
 
-1. **Inspect the database first — never assume a model or app is available.**
-   - Check the modules you will need are installed:
-     `odoo-crud search-read ir.module.module --domain '[["name","in",["contacts","product","stock","crm","sale_management","account"]]]' --fields '["name","state"]'`
-   - **Install ALL the modules you need in ONE blocking call** before importing
-     (crm → crm.lead, stock → stock.quant, product/sale → product.template):
-     `odoo-crud install-modules crm stock sale_management account`
-     This command installs the modules AND confirms their final state before it
-     returns (its JSON lists `not_installed` if any failed). There is **nothing to
-     wait for** — as soon as it returns, move straight on to the next step.
-   - Confirm each target model and its fields exist, and adapt your CSV columns to
-     what this database/version actually has:
-     `odoo-crud models --filter crm` and `odoo-crud fields crm.lead`.
-     `fields` prints one compact line per field (`many2one required -> res.partner`).
-     On big models (`res.partner`, `product.template`) narrow it —
-     `odoo-crud fields res.partner --filter address` — instead of dumping every
-     field; only add `--full` if you genuinely need a field's help text.
-2. **Configure the company** from your research: set the country, company name and currency on
-   `res.company` to match the company's real location (find the id with
-   `search-read`, then `odoo-crud write res.company --ids '[1]' --values
-   '{"country_id": 241, "currency_id": 23}'` — use the dedicated `write`
-   command, not `call ... write`, which needs a much easier-to-get-wrong nested
-   `--args '[[ids], {values}]'` shape).
-3. **Generate & import** each CSV: write it to a file (e.g. `res_partner.csv`),
-   then `odoo-crud import-csv <model> --file <path>`.
-4. If an import reports errors, diagnose with
-   `odoo-crud import-preview <model> --file <path>`, `odoo-crud fields <model>` and
-   `odoo-crud models`, fix the CSV, and retry.
+When a call fails, a record you know exists comes back missing, or a number
+reads zero after a green import, the cause is almost always one of the Odoo
+behaviours collected in [`ODOO-TRAPS.md`](ODOO-TRAPS.md) — read it then.
 
-Import in **dependency order** — partners → products → stock → leads — because of
-the ID references below.
+## Run
 
-## Dataset size (how many records)
+### 1. Research the target
 
-The prompt gives a size — **small**, **medium**, or **big**. Treat it as the
-**overall scale of the business** and apply it **consistently to every model you
-populate** (partners, products, stock, leads, and anything else you add such as
-sale.order, account.move or mrp.bom) using realistic ratios. Don't size one model
-richly and leave the others almost empty.
+Browse the site and collect: the sector, the *real* products or services and
+their prices, the company's location (it drives country and currency), and the
+URLs of the logo and the product photos. Make each URL absolute — some sites
+emit protocol-relative `//cdn.example.com/…`, which needs an `https:` prefix.
 
-Anchor on the number of **customers**, then derive everything else in proportion:
+With no website given, generate coherent generic data for the stated industry
+instead.
 
-| size   | customers (anchor) | feel                                 |
-|--------|--------------------|--------------------------------------|
-| small  | ~8                 | a small shop — just enough to demo   |
-| medium | ~25                | an established SMB                    |
-| big    | ~80                | a large company, rich data           |
+*Done when* you can name the products you will import and the country you will
+set on the company.
 
-Derive the rest from that anchor with sensible, sector-adjusted ratios, e.g.:
-- **vendors** ≈ customers ÷ 6 (always just a handful).
-- **products** ≈ a catalogue smaller than the customer base (fewer for a services
-  business). If the site has fewer genuine products than that, stay truthful: use
-  the real ones and reach the number with real **variants** (sizes, flavours,
-  formats) — never invent unrelated products.
-- **stock.quant** — one line per storable (`detailed_type = product`) product.
-- **leads** ≈ half to one× the number of customers.
-- **any other model you create** (sale orders, invoices, BoMs…) — scale to match
-  and keep every reference valid via external IDs.
+### 2. Probe the database
 
-Keep the whole dataset internally consistent and proportional to the chosen size.
+This database's version decides which models, fields and apps exist — read them,
+never assume them.
 
-## Files to generate (default set)
+- `odoo-crud auth-check` — first command of the run. If it fails, stop and say
+  why; nothing downstream can work.
+- `odoo-crud models --filter crm` — which models are there.
+- `odoo-crud fields product.template --filter 'name,list_price,barcode'` — one
+  compact line per field (`many2one required -> res.partner`), including a
+  selection field's allowed values. Filter by the columns you plan to write;
+  dumping every field of `res.partner` or `product.template` buries the answer.
+- `odoo-crud install-modules crm stock sale_management account` — every module
+  you need in ONE call. It installs *and* confirms before returning, and its
+  JSON lists `not_installed` for anything that failed.
 
-1. **res.partner** — customers + vendors scaled per the size section.
+*Done when* every column of every CSV you are about to write has appeared in a
+`fields` output, with its type and — for selection fields — its allowed values
+copied verbatim.
+
+### 3. Configure the company
+
+Set country, company name and currency on `res.company` to the real location:
+find the id with `search-read`, then
+
+```
+odoo-crud write res.company --ids '[1]' --values '{"country_id": 241, "currency_id": 23}'
+```
+
+A currency that seems absent is archived, not missing — see the traps file.
+
+### 4. Size the dataset
+
+The prompt gives **small**, **medium** or **big**. It is the scale of the whole
+business, so it applies to every model you populate. Anchor on the customer
+count and derive the rest in sector-adjusted proportion:
+
+| size   | customers (anchor) | feel                               |
+|--------|--------------------|------------------------------------|
+| small  | ~8                 | a small shop — just enough to demo |
+| medium | ~25                | an established SMB                 |
+| big    | ~80                | a large company, rich data         |
+
+- **vendors** ≈ customers ÷ 6 — always a handful.
+- **products** ≈ a catalogue smaller than the customer base, fewer still for a
+  services business. When the site has fewer genuine products than that, reach
+  the number with real **variants** (sizes, flavours, formats) — ground truth
+  outranks the target count.
+- **stock on hand** — a quantity for every storable product.
+- **leads** ≈ half to one× the customers.
+- **anything else you create** — sale orders, invoices, BoMs — scaled to match.
+
+Sizing one model richly and leaving its neighbours empty is what makes a demo
+look fake.
+
+### 5. Generate and import
+
+Write each CSV to a file, then `odoo-crud import-csv <model> --file <path>`.
+Import in **dependency order** so every reference resolves:
+
+1. **`res.partner`** — customers + vendors.
    Columns: `id` (e.g. `partner_client_1`), `name`, `is_company`, `street`,
    `city`, `email`, `phone`.
-2. **product.template** — real flagship products found on the site, scaled per the
-   size section (see variant rule above).
+2. **`product.template`** — the flagship products you found.
    Columns: `id` (e.g. `product_1`), `name`, `list_price`, `standard_price`,
-   `detailed_type` (`consu`, `product`, or `service`), `barcode`.
-3. **stock.quant** — stock lines, only for items where `detailed_type = product`.
-   Columns: `product_id/id` (must reuse the exact id from the product file, e.g.
-   `product_1`), `inventory_quantity`, `location_id` (value: `WH/Stock`).
-   **`product_id/id` is required and easy to get wrong** (a mismatched or missing
-   id here fails with a raw "not-null constraint" error at import time) — before
-   writing this CSV, run `odoo-crud import-preview stock.quant --file <path>` and
-   confirm every row shows a real, existing product id from the product file
-   (never a made-up or renamed one), then import.
-4. **crm.lead** — leads scaled per the size section.
-   Columns: `id` (e.g. `lead_1`), `name`, `partner_id/id` (reuse an id from file 1),
-   `expected_revenue`, `description`, `stage_id` (value: `New`, `Qualified`, or `Proposition`).
+   `barcode`, plus this database's product-type and storability columns —
+   whatever step 2's `fields product.template --filter 'type,storable'` showed,
+   with the selection values verbatim. Whether storability is one of those
+   values or its own boolean flag varies by version.
+3. **stock on hand** — a *second pass over `product.template`*, one row per
+   product you marked storable, carrying just `id` (the same external id as
+   above) and `qty_available`. The ids already exist, so Odoo runs the same code
+   path as typing a quantity on the product form: it creates the quant and
+   applies it, and the goods really are on hand.
+4. **`crm.lead`** — columns: `id` (e.g. `lead_1`), `name`, `partner_id/id`
+   (an id from file 1), `expected_revenue`, `description`, `stage_id` (`New`,
+   `Qualified` or `Proposition`).
 
-If the sales person asks for extra files (`mrp.bom`, employees, chart of accounts,
-etc.), generate them too, keeping the same relational logic.
+Three rules bind every CSV:
 
-## Images
+- **External IDs** — every row carries an `id` column and every reference is
+  `field_id/id` pointing at one. This is what makes a re-import update the
+  record instead of duplicating it, and it is non-negotiable.
+- **Quoting** — comma separator, and every text value wrapped in double quotes
+  so `"Company, Inc."` stays one column.
+- **Language** — the site's language, or the one the sales person asked for.
 
-Use **real** images you find while researching the site — never generate images.
-While reading the website, collect the URLs of the company logo and of product
-photos. Make sure each URL is absolute (starts with `https://` — some sites
-emit protocol-relative URLs like `//cdn.example.com/...`; prefix those with
-`https:`). After a record is created, set its picture with:
+Asked for more than the default set (`mrp.bom`, employees, chart of accounts…)?
+Build those the same way: sized to the anchor, wired with external IDs, imported
+after whatever they reference.
 
-`odoo-crud set-image <model> --id <record_id> --url <image_url>`
+*Done when* every import has returned `ok: true` and its record count matches
+the number step 4 called for. On a failure, `ODOO-TRAPS.md` names the cause; fix
+the CSV and re-import — external ids make the retry safe.
 
-(it downloads the image and writes it to `image_1920`). Good uses: the company
-logo on `res.company`, and each product's real photo on its `product.template`.
-Skip any record where you have no genuine image — do not invent one. Set images
-only after the records exist so you have their ids.
+### 6. Set images
 
-## Strict formatting & content rules
+Once the records exist and you have their ids:
 
-- **ZERO HALLUCINATION** — use only real product/service names found on the site.
-  If there is no public price, use `0.00` (do not block the import). If the data
-  found is too thin, say so briefly before importing.
-- **CSV SAFETY** — wrap every text value in double quotes `"` so internal commas
-  (e.g. `"Company, Inc."`) do not break columns. The column separator is a comma `,`.
-- **ODOO INTEGRITY (External IDs)** — always use the `id` column to create records,
-  and reference them with `field_id/id`. This is non-negotiable: it prevents
-  duplicates across successive imports.
-- **LANGUAGE** — generate the data in the target website's language, or the
-  language requested by the sales person.
-- **EFFICIENCY** — no long explanations; get straight to the point.
+```
+odoo-crud set-image <model> --id <record_id> --url <image_url>
+```
+
+It downloads the image into `image_1920`, targeting the record by its database
+id — not its external id. The company logo on `res.company` is set on the `logo` field
+and each product's real photo are the two that carry a demo.
+Records with no genuine image keep none.
+
+### 7. Verify, then summarise
+
+Read back what you wrote — a green import is not proof:
+
+- `odoo-crud search-read product.template --fields '["name","qty_available"]'` —
+  every storable product shows the quantity you imported. `qty_available` is the
+  number that counts; `inventory_quantity` is not.
+- A `search-read` per model you populated, confirming the counts from step 4.
+
+*Done when* every model you touched has been read back and matches. Then print
+the `SUMMARY:` line.
