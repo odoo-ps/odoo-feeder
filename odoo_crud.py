@@ -46,8 +46,26 @@ def get_config():
     return url, login, secret
 
 
-def connect():
-    """Authenticate and return (uid, models_proxy, url, db, login, secret)."""
+_CONNECTION = None
+
+
+def connect(force=False):
+    """Authenticate and return (uid, models_proxy, url, db, login, secret, version).
+
+    Memoized for the life of the process. Authenticating once per RPC cost two
+    extra round trips (version + authenticate) on every call — install-modules
+    alone paid that five times. XML-RPC is stateless per request, so the uid and
+    the proxies stay valid for the whole run; reusing the ServerProxy also keeps
+    its HTTP connection alive between calls, which saves the TLS handshake too.
+
+    Pass force=True to drop the cached connection and authenticate again (see
+    execute(), which does that once if the kept-alive socket has gone stale).
+    """
+    global _CONNECTION
+    if _CONNECTION is not None and not force:
+        return _CONNECTION
+    _CONNECTION = None
+
     url, login, secret = get_config()
     common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common", allow_none=True)
     try:
@@ -68,7 +86,8 @@ def connect():
             f"name '{db}'. Set ODOO_DB if the database name differs from the host."
         )
     models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object", allow_none=True)
-    return uid, models, url, db, login, secret, version
+    _CONNECTION = (uid, models, url, db, login, secret, version)
+    return _CONNECTION
 
 
 def _guess_db(url):
@@ -78,15 +97,25 @@ def _guess_db(url):
 
 
 def execute(model, method, args=None, kwargs=None):
-    uid, models, _url, db, _login, secret, _version = connect()
-    try:
-        return models.execute_kw(
-            db, uid, secret, model, method, args or [], kwargs or {}
-        )
-    except xmlrpc.client.Fault as fault:
-        fail(f"Odoo error in {model}.{method}: {fault.faultString}")
-    except Exception as exc:  # noqa: BLE001
-        fail(f"Call {model}.{method} failed: {exc}")
+    # Two attempts: the connection is now reused across calls, so its kept-alive
+    # socket can go cold when the server reloads its registry (which is exactly
+    # what button_immediate_install does). xmlrpc's own Transport already
+    # re-opens a merely-dropped socket; this outer retry covers the case it does
+    # not — the server still refusing when that immediate retry runs — by
+    # authenticating again from scratch. An Odoo Fault is an application error,
+    # never a connection problem, so it is reported as-is without a retry.
+    for attempt in (0, 1):
+        uid, models, _url, db, _login, secret, _version = connect(force=bool(attempt))
+        try:
+            return models.execute_kw(
+                db, uid, secret, model, method, args or [], kwargs or {}
+            )
+        except xmlrpc.client.Fault as fault:
+            fail(f"Odoo error in {model}.{method}: {fault.faultString}")
+        except Exception as exc:  # noqa: BLE001
+            if attempt == 0:
+                continue
+            fail(f"Call {model}.{method} failed: {exc}")
 
 
 def parse_json(value, what):
@@ -222,8 +251,9 @@ def cmd_install_modules(args):
 
     button_immediate_install is synchronous server-side: when it returns, the
     modules are installed and the registry reloaded. We then re-query the states
-    on a fresh connection (each execute() re-authenticates) so the caller gets a
-    definitive result and never needs to 'wait'.
+    so the caller gets a definitive result and never needs to 'wait'. The re-read
+    is a plain RPC — XML-RPC carries no client-side registry, so reusing the
+    memoized connection still sees the post-install state.
     """
     names = args.modules
     recs = execute(
@@ -238,7 +268,7 @@ def cmd_install_modules(args):
         _disable_demo_data()
         execute("ir.module.module", "button_immediate_install", [to_install])
 
-    # Fresh connection (registry has reloaded) to report the final states.
+    # Re-read the states after the install to report the final result.
     final = execute(
         "ir.module.module", "search_read",
         [[["name", "in", names]]], {"fields": ["name", "state"]},
