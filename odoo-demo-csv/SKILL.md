@@ -73,12 +73,16 @@ never assume them.
   selection field's allowed values. Filter by the columns you plan to write;
   dumping every field of `res.partner` or `product.template` buries the answer.
 - `odoo-crud install-modules crm stock sale_management account` — every module
-  you need in ONE call. It installs *and* confirms before returning, and its
-  JSON lists `not_installed` for anything that failed.
+  behind step 5's import order, in ONE call. Read the list straight off that
+  order: `res.partner` → `contacts`, `product.template` → `product` and
+  `sale_management`, stock on hand → `stock`, `crm.lead` → `crm`, plus `account`
+  for invoicing. It installs *and* confirms before returning, and its JSON lists
+  `not_installed` for anything that failed.
 
-*Done when* every column of every CSV you are about to write has appeared in a
-`fields` output, with its type and — for selection fields — its allowed values
-copied verbatim.
+*Done when* `install-modules` has come back with `not_installed` empty, and
+every column of every CSV you are about to write has appeared in a `fields`
+output, with its type and — for selection fields — its allowed values copied
+verbatim.
 
 ### 3. Configure the company
 
