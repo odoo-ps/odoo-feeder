@@ -17,12 +17,13 @@ set -euo pipefail
 # Configuration
 # --------------------------------------------------------------------------- #
 # Public GitHub repo (owner/repo) holding the demo skills, pulled via `npx skills`.
-# Leave empty to skip the remote skills refresh.
-SKILLS_REPO="odoo-ps/odoo-feeder"
+# Set it empty (SKILLS_REPO= odoo-demo-feeder) to skip the remote refresh and run
+# whatever is already in ~/.agents/skills — the way to try a skill edit unpushed.
+SKILLS_REPO="${SKILLS_REPO-odoo-ps/odoo-feeder}"
 
 # The one-line bootstrap that installs every dependency and fetches this tool.
 # Standalone-run error messages point here (there is no separate install.sh).
-BOOTSTRAP="bash <(curl -fsSL https://raw.githubusercontent.com/${SKILLS_REPO}/main/feed.sh)"
+BOOTSTRAP="bash <(curl -fsSL https://raw.githubusercontent.com/odoo-ps/odoo-feeder/main/feed.sh)"
 
 CRUD_TOOL="${CRUD_TOOL:-$HOME/.local/share/odoo-demo-feeder/odoo_crud.py}"
 # Which AI CLI drives the agent: "agy" (Antigravity, default), "copilot"
