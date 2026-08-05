@@ -420,7 +420,7 @@ def cmd_import_preview(args):
     headers, body = _read_csv(args.file)
     meta = execute(
         args.model, "fields_get", [],
-        {"attributes": ["string", "type", "relation", "required"]},
+        {"attributes": ["string", "relation"] + _REQUIRED_ATTRS},
     )
     columns = []
     for header in headers:
@@ -433,7 +433,7 @@ def cmd_import_preview(args):
             "type": meta.get(base, {}).get("type"),
         })
     unknown = [c["header"] for c in columns if not c["exists"]]
-    missing_required = _missing_required_fields(meta, headers)
+    missing_required = _missing_required_fields(args.model, meta, headers)
     ok({
         "model": args.model,
         "rows": len(body),
@@ -444,19 +444,40 @@ def cmd_import_preview(args):
     })
 
 
-def _missing_required_fields(meta, headers):
-    """Model fields Odoo marks required but absent from the CSV headers.
+_REQUIRED_ATTRS = ["type", "required", "readonly", "store"]
+
+
+def _missing_required_fields(model, meta, headers):
+    """Model fields that genuinely have to come from the CSV but are absent.
 
     A missing required field (e.g. product_id on stock.quant) doesn't always
     surface as a clean load() message — it can slip through as NULL and crash
     at the SQL layer with a raw, uncaught 'not-null constraint' error instead.
     Catching it here, before load() ever runs, turns that into one clear line.
+
+    But 'required' in fields_get describes the field *definition*, not whether
+    a value must be supplied, so it cannot be used on its own. product.template
+    marks type, uom_id, service_tracking and base_unit_count required and every
+    one of them has a default; product_variant_ids is required and is a
+    one2many the ORM fills in itself. Reporting those refuses a perfectly good
+    import, so narrow the list to fields that are writable, stored, not a
+    x2many, and have no default — the last of which only Odoo can answer, via
+    default_get.
     """
-    present = {_field_base(h) for h in headers}
-    return sorted(
+    present = {_field_base(header) for header in headers}
+    candidates = [
         name for name, info in meta.items()
-        if info.get("required") and name not in present
-    )
+        if info.get("required")
+        and name not in present
+        and not info.get("readonly")
+        and info.get("store", True)
+        and info.get("type") not in ("one2many", "many2many")
+    ]
+    if not candidates:
+        return []
+    # default_get returns an entry only for the fields that do have a default.
+    defaults = execute(model, "default_get", [sorted(candidates)]) or {}
+    return sorted(name for name in candidates if name not in defaults)
 
 
 def cmd_import_csv(args):
@@ -465,8 +486,8 @@ def cmd_import_csv(args):
     headers, body = _read_csv(args.file)
     fields = parse_json(args.fields, "--fields") or headers
 
-    meta = execute(args.model, "fields_get", [], {"attributes": ["required"]})
-    missing_required = _missing_required_fields(meta, fields)
+    meta = execute(args.model, "fields_get", [], {"attributes": _REQUIRED_ATTRS})
+    missing_required = _missing_required_fields(args.model, meta, fields)
     if missing_required:
         fail(
             f"CSV for {args.model} is missing required field(s): "
