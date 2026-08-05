@@ -572,23 +572,32 @@ def cmd_import_preview(args):
         args.model, "fields_get", [],
         {"attributes": ["string", "relation"] + _REQUIRED_ATTRS},
     )
+    # The same matcher import-csv refuses on, so a preview that reports no
+    # unknown column is a promise that the import will not be rejected over one
+    # — and a preview that reports one carries the same suggestion.
+    unknown = _unknown_columns(meta, headers)
+    suggestions = dict(unknown)
     columns = []
     for header in headers:
         base = _field_base(header)
-        exists = base == "id" or base in meta
-        columns.append({
+        column = {
             "header": header,
             "field": base,
-            "exists": exists,
+            "exists": header not in suggestions,
             "type": meta.get(base, {}).get("type"),
-        })
-    unknown = [c["header"] for c in columns if not c["exists"]]
+        }
+        if suggestions.get(header):
+            column["suggestion"] = suggestions[header]
+        columns.append(column)
     missing_required = _missing_required_fields(args.model, meta, headers)
     ok({
         "model": args.model,
         "rows": len(body),
         "columns": columns,
-        "unknown_columns": unknown,
+        "unknown_columns": [
+            {"header": header, "suggestion": suggestion}
+            for header, suggestion in unknown
+        ],
         "missing_required_columns": missing_required,
         "sample_rows": body[:3],
     })
@@ -598,11 +607,12 @@ _REQUIRED_ATTRS = ["type", "required", "readonly", "store"]
 
 
 def _unknown_columns(meta, headers):
-    """CSV columns that map to no field, each paired with a near-miss hint.
+    """CSV columns that map to no field, each paired with a near-miss guess.
 
-    Returns [(column, " (did you mean 'x'?)"), ...] — the suggestion comes from
-    the model's real field names, which is usually enough to fix the CSV without
-    another round trip.
+    Returns [(column, suggestion or None), ...], drawn from the model's real
+    field names — usually enough to fix the CSV without another round trip.
+    Callers do the wording: import-csv folds it into its refusal, import-preview
+    reports it as JSON.
     """
     import difflib
 
@@ -619,7 +629,7 @@ def _unknown_columns(meta, headers):
             # 'type' is preferred over 'service_tracking_type'.
             contained = sorted((f for f in meta if f in base or base in f), key=len)
             close = contained[:1]
-        unknown.append((header, f" (did you mean '{close[0]}'?)" if close else ""))
+        unknown.append((header, close[0] if close else None))
     return unknown
 
 
@@ -669,9 +679,13 @@ def cmd_import_csv(args):
     # import plus a full fields_get dump to work out which column was wrong.
     unknown = _unknown_columns(meta, fields)
     if unknown:
+        listed = ", ".join(
+            f"{column} (did you mean '{suggestion}'?)" if suggestion else column
+            for column, suggestion in unknown
+        )
         fail(
             f"CSV for {args.model} has column(s) that are not fields of the "
-            f"model: {', '.join(f'{col}{hint}' for col, hint in unknown)}. "
+            f"model: {listed}. "
             f"Check 'odoo-crud fields {args.model} --filter <text>' for the "
             "exact names — nothing was imported."
         )
