@@ -161,16 +161,25 @@ the CSV and re-import — external ids make the retry safe.
 
 ### 6. Set images
 
-Once the records exist and you have their ids:
+A product grid with real photos is what makes the demo land on screen.
 
 ```
-odoo-crud set-image <model> --id <record_id> --url <image_url>
+odoo-crud set-image product.template --id <record_id> --url <image_url>
+odoo-crud set-image res.company --id 1 --url <logo_url> --field logo
 ```
 
-It downloads the image into `image_1920`, targeting the record by its database
-id — not its external id. The company logo on `res.company` is set on the `logo` field
-and each product's real photo are the two that carry a demo.
-Records with no genuine image keep none.
+Two details decide whether these calls land:
+
+- **Database id, not external id.** `--id` takes the integer Odoo assigned. Get
+  them with one `search-read` on the model you just imported — it returns each
+  record's `id` beside its `name`, which is what you match your photo URLs on.
+- **The field.** It writes `image_1920` by default; the company logo lives on
+  `logo`, so that call carries `--field logo`.
+
+Records with no genuine image keep none — that is the only reason to skip one.
+
+*Done when* every product whose photo URL you collected in step 1 has had a
+`set-image` call return `ok: true`, and the logo is on the company.
 
 ### 7. Verify, then summarise
 
