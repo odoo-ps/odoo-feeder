@@ -140,7 +140,9 @@ Import in **dependency order** so every reference resolves:
    applies it, and the goods really are on hand.
 4. **`crm.lead`** — columns: `id` (e.g. `lead_1`), `name`, `partner_id/id`
    (an id from file 1), `expected_revenue`, `description`, `stage_id` (`New`,
-   `Qualified` or `Proposition`).
+   `Qualified` or `Proposition`). Write every `description` in the **customer's
+   voice** — the two or three lines that prospect sent in, naming the real
+   product they are asking about and what they need it for.
 
 Three rules bind every CSV:
 
