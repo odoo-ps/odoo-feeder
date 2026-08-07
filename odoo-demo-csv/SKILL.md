@@ -38,8 +38,11 @@ command available to you, and it reads its credentials from the environment.
   `--domain`, `--values`, `--args`, `--context`, `--filter` lives there. Read it
   rather than guess a shape.
 
-Use your own file tools to write the CSVs and your browsing tools to research —
-writing CSV into the chat instead of into a file imports nothing.
+Use your own file tools to write the CSVs and your browsing tools to research.
+You have no shell beyond `odoo-crud` itself — writing CSV into the chat, or
+into a script you then try to run to generate the file, both go nowhere (the
+run to generate it is blocked); write the CSV content directly with your file
+tool.
 
 When a call fails, a record you know exists comes back missing, or a number
 reads zero after a green import, the cause is almost always one of the Odoo
