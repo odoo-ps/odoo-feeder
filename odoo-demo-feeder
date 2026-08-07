@@ -307,7 +307,16 @@ provider_log_error_pattern() {
 }
 # Permission rules the agy agent needs: the CRUD wrapper, plus web/file access
 # for the skill (see the settings-merge block in Step 2 below). agy-only.
-provider_permission_allow_rules() { printf '%s\n' "command(odoo-crud)" "read_url(*)" "read_file(*)" "write_file(*)"; }
+#
+# 'command(odoo-crud)' only allows the name; agy's --sandbox mode separately
+# gates any command that needs network/full-disk access (odoo-crud does, for
+# its XML-RPC calls) behind its own "Allow sandbox bypass?" prompt — a prompt
+# headless mode can't answer, and even in --interactive mode it just adds a
+# per-call confirmation the agent has to get through every time. Persisting
+# 'unsandboxed(odoo-crud)' — the exact rule agy itself writes here when a human
+# picks "always allow ... (Persist to settings.json)" — grants that bypass
+# upfront instead of prompting for it.
+provider_permission_allow_rules() { printf '%s\n' "command(odoo-crud)" "unsandboxed(odoo-crud)" "read_url(*)" "read_file(*)" "write_file(*)"; }
 
 AGY_MODEL="${AGY_MODEL:-$(provider_default_model)}"   # kept for backwards compatibility
 AI_MODEL="${AI_MODEL:-$AGY_MODEL}"
