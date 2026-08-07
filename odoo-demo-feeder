@@ -690,6 +690,34 @@ printf '%s\n' "$REQUEST" > "$WORK/request.txt"
 # all of them is harmless).
 mkdir -p "$HOME/.gemini" "$HOME/.copilot" "$HOME/.claude" "$HOME/.cache"
 
+# agy asks "Do you trust the contents of this project?" the first time it sees
+# a workspace path, and $WORK is a fresh mktemp dir every run — so this would
+# fire on every single run. In print mode it is silently bypassed (nothing can
+# answer a headless prompt), but in --interactive mode it genuinely blocks on a
+# keypress agy is never sent, which looks exactly like an empty, stuck prompt.
+# Pre-register $WORK as trusted the same way trust is normally earned (answer
+# once, agy remembers the path in this file) so it never has to ask.
+if [[ "$AI_CLI" == "agy" ]]; then
+    AI_SETTINGS="$(provider_settings_path)"
+    mkdir -p "$(dirname "$AI_SETTINGS")"
+    python3 - "$AI_SETTINGS" "$WORK" <<'PY' || true
+import json, sys
+path, work = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        data = {}
+except Exception:
+    data = {}
+trusted = data.setdefault("trustedWorkspaces", [])
+if work not in trusted:
+    trusted.append(work)
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+PY
+fi
+
 # Make the skill visible to agy as a WORKSPACE skill (.agents/skills under the
 # working dir). This is the unambiguous location agy reads, regardless of which
 # global dir the skills CLI used. $WORK is the agent's --chdir root.
