@@ -207,7 +207,8 @@ A template is a free-text block the AI reads directly — write any keys you lik
   configuration: enable pricelists, multi-currency, default sales team "Retail"
 
 Other:
-  -i, --interactive     Drive the AI agent interactively (advanced).
+  -i, --interactive     Drive the AI agent interactively — launches its TUI
+                        instead of running headless (advanced).
       --plan            Review a plan and approve it before any change is made
                         (implies interactive).
       --ai-cli NAME     AI CLI to drive the agent: 'agy' (Antigravity, default),
@@ -752,7 +753,7 @@ build_ai_argv() {
     case "$AI_CLI" in
         agy)
             if [[ "$mode" == "interactive" ]]; then
-                AI_ARGV=("$AI_BIN" --sandbox --model "$AI_MODEL" "$request")
+                AI_ARGV=("$AI_BIN" --sandbox --model "$AI_MODEL" -i "$request")
             else
                 AI_ARGV=("$AI_BIN" -p "$request" --model "$AI_MODEL" --print-timeout "$AGY_TIMEOUT")
             fi
