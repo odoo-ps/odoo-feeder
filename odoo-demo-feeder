@@ -275,7 +275,21 @@ provider_bin() {
 }
 provider_default_model() {
     case "$AI_CLI" in
-        agy)     printf 'gemini-3-pro' ;;
+        agy)
+            # agy's model ids change from release to release (renames, retired
+            # tiers), and an unknown id makes it abort immediately ("model ...
+            # is not recognized"), so never hardcode one: ask the installed
+            # build what it actually offers and prefer from there.
+            # Output varies by build: a bare id per line, or 'id<TAB>Display
+            # Name' behind a 'Fetching available models...' status line — take
+            # the first field and keep only lines that look like an id.
+            local models pref
+            models="$(agy models 2>/dev/null | awk '{print $1}' | grep -E '^[a-z0-9.-]+$')"
+            for pref in gemini-3.1-pro-high gemini-3.1-pro-low gemini-3.6-flash-high gemini-3.5-flash-high; do
+                if grep -qxF -- "$pref" <<<"$models"; then printf '%s' "$pref"; return; fi
+            done
+            printf '%s' "$(head -n1 <<<"$models")"   # none of the preferences exist
+            ;;
         copilot) printf 'auto' ;;   # let Copilot pick a model automatically
         claude)  printf 'sonnet' ;;
     esac
