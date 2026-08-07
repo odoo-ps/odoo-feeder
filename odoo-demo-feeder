@@ -393,7 +393,12 @@ provider_signed_in() {
     case "$AI_CLI" in
         agy)
             [[ -n "${ANTIGRAVITY_TOKEN:-}" ]] && return 0
-            local m; m="$("$AI_BIN" models 2>/dev/null | grep -m1 .)"   # first valid model name
+            # Output varies by build: a bare id per line, or 'id<TAB>Display
+            # Name' behind a 'Fetching available models...' status line — take
+            # the first field and keep only lines that look like an id, or the
+            # status line itself gets used as a "model" and the ping below
+            # fails on a bogus name, misreporting a signed-in session as not.
+            local m; m="$("$AI_BIN" models 2>/dev/null | awk '{print $1}' | grep -E '^[a-z0-9.-]+$' | head -n1)"
             [[ -n "$m" ]] || return 1
             if command -v timeout >/dev/null 2>&1; then
                 timeout 30 "$AI_BIN" -p ping --model "$m" --print-timeout 25s >/dev/null 2>&1
