@@ -49,40 +49,47 @@ behaviours collected in [`ODOO-TRAPS.md`](ODOO-TRAPS.md) — read it then.
 
 ### 1. Research the target
 
-Browse the site and collect: the sector, the *real* products or services and
-their prices, the company's location (it drives country and currency), and the
-URLs of the logo and the product photos. Make each URL absolute — some sites
+Browse the site and collect: the trade it is in, the *real* products or services
+and their prices, the company's location (it drives country and currency), and
+the URLs of the logo and the product photos. Make each URL absolute — some sites
 emit protocol-relative `//cdn.example.com/…`, which needs an `https:` prefix.
 
 With no website given, generate coherent generic data for the stated industry
 instead.
 
-*Done when* you can name the products you will import and the country you will
-set on the company.
+*Done when* you can name the trade the business is in, the products you will
+import, and the country you will set on the company.
 
 ### 2. Probe the database
 
 This database's version decides which models, fields and apps exist — read them,
-never assume them.
+never assume them. Install before you read: a model's fields only exist once the
+module defining them is in, so these run in order.
 
 - `odoo-crud auth-check` — first command of the run. If it fails, stop and say
   why; nothing downstream can work.
-- `odoo-crud models --filter crm` — which models are there.
+- The **industry** module configures the database for the trade the target is
+  in — its apps, its reports, its own sample records — and one of them fits
+  almost every business a sales person will name. Match step 1's research
+  against [`INDUSTRY-MODULES.md`](INDUSTRY-MODULES.md) and pick the one that
+  fits.
+- `odoo-crud install-modules bakery crm stock sale_management account` — that
+  industry module plus every module behind step 5's import order, in ONE call.
+  Read the base list straight off that order: `res.partner` → `contacts`,
+  `product.template` → `product` and `sale_management`, stock on hand →
+  `stock`, `crm.lead` → `crm`, plus `account` for invoicing. It installs *and*
+  confirms before returning, and its JSON lists `not_installed` for anything
+  that failed.
+- `odoo-crud models --filter crm` — which models the install actually gave you.
 - `odoo-crud fields product.template --filter 'name,list_price,barcode'` — one
   compact line per field (`many2one required -> res.partner`), including a
   selection field's allowed values. Filter by the columns you plan to write;
   dumping every field of `res.partner` or `product.template` buries the answer.
-- `odoo-crud install-modules crm stock sale_management account` — every module
-  behind step 5's import order, in ONE call. Read the list straight off that
-  order: `res.partner` → `contacts`, `product.template` → `product` and
-  `sale_management`, stock on hand → `stock`, `crm.lead` → `crm`, plus `account`
-  for invoicing. It installs *and* confirms before returning, and its JSON lists
-  `not_installed` for anything that failed.
 
-*Done when* `install-modules` has come back with `not_installed` empty, and
-every column of every CSV you are about to write has appeared in a `fields`
-output, with its type and — for selection fields — its allowed values copied
-verbatim.
+*Done when* `install-modules` has come back with `not_installed` empty — the
+industry module among them — and every column of every CSV you are about to
+write has appeared in a `fields` output, with its type and — for selection
+fields — its allowed values copied verbatim.
 
 ### 3. Configure the company
 
@@ -99,7 +106,7 @@ A currency that seems absent is archived, not missing — see the traps file.
 
 The prompt gives **small**, **medium** or **big**. It is the scale of the whole
 business, so it applies to every model you populate. Anchor on the customer
-count and derive the rest in sector-adjusted proportion:
+count and derive the rest in trade-adjusted proportion:
 
 | size   | customers (anchor) | feel                               |
 |--------|--------------------|------------------------------------|
@@ -191,6 +198,8 @@ Read back what you wrote — a green import is not proof:
   every storable product shows the quantity you imported. `qty_available` is the
   number that counts; `inventory_quantity` is not.
 - A `search-read` per model you populated, confirming the counts from step 4.
+  The industry module shipped records of its own, so a model total is its rows
+  plus yours — count the ones you imported.
 
 *Done when* every model you touched has been read back and matches. Then print
 the `SUMMARY:` line.

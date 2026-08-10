@@ -9,7 +9,8 @@ Load the `writing-for-agents` skill before editing any of them — including the
 `REQUEST` prompt and this file, which are agent documents that do not look like
 skills.
 
-- `odoo-demo-csv/SKILL.md` (+ `ODOO-TRAPS.md`) — the run the agent follows.
+- `odoo-demo-csv/SKILL.md` (+ `ODOO-TRAPS.md`, `INDUSTRY-MODULES.md`) — the run
+  the agent follows.
 - The `REQUEST` prompt in `odoo-demo-feeder` — what the run is *this time*
   (target, size, tool name, `SUMMARY:` format). It defers everything else to the
   skill, and names the skill's `Dataset size` heading: renaming that heading
