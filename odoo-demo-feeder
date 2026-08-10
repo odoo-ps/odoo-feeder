@@ -707,7 +707,8 @@ printf '%s\n' "$REQUEST" > "$WORK/request.txt"
 # The AI CLI needs a writable config/auth dir; make sure it exists so the bind
 # succeeds (agy: ~/.gemini, copilot: ~/.copilot, claude: ~/.claude — creating
 # all of them is harmless).
-mkdir -p "$HOME/.gemini" "$HOME/.copilot" "$HOME/.claude" "$HOME/.cache"
+mkdir -p "$HOME/.gemini" "$HOME/.copilot" "$HOME/.claude" "$HOME/.cache" "$HOME/.ssh"
+chmod 700 "$HOME/.ssh"
 
 # agy asks "Do you trust the contents of this project?" the first time it sees
 # a workspace path, and $WORK is a fresh mktemp dir every run — so this would
