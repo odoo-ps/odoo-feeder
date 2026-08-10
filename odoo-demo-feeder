@@ -498,7 +498,7 @@ while :; do
         
         echo
         info "Please re-enter your credentials."
-        local new_url
+        new_url=""
         while :; do
             new_url="$(ui_input "Odoo URL" "$ODOO_URL")"
             new_url="${new_url%/}"
