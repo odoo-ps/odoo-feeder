@@ -207,6 +207,23 @@ else
 fi
 
 # --------------------------------------------------------------------------- #
+# Check if the environment has a token for the selected provider (unattended runs).
+# --------------------------------------------------------------------------- #
+provider_has_env_token() {
+    case "$AI_CLI" in
+        agy)
+            [[ -n "${ANTIGRAVITY_TOKEN:-}" ]]
+            ;;
+        copilot)
+            [[ -n "${OPENROUTER_MODEL:-}" || -n "${COPILOT_GITHUB_TOKEN:-}" || -n "${GH_TOKEN:-}" || -n "${GITHUB_TOKEN:-}" ]]
+            ;;
+        claude)
+            [[ -n "${ANTHROPIC_API_KEY:-}" || -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]
+            ;;
+    esac
+}
+
+# --------------------------------------------------------------------------- #
 # Whether the provider CLI can actually reach its backend (i.e. is signed in).
 # agy (Antigravity, OS keyring) and copilot don't reliably expose sign-in via a
 # file to stat, so we do a real, bounded headless call for those. claude has an
@@ -214,6 +231,7 @@ fi
 # so use that directly instead of a synthetic ping. Set ASSUME_SIGNED_IN=1 to
 # skip the probe (flaky network, offline demos, or when you know you are
 # logged in).
+# --------------------------------------------------------------------------- #
 provider_signed_in() {
     [[ -n "${ASSUME_SIGNED_IN:-}" ]] && return 0
     local bin; bin="$(provider_bin)"
@@ -253,7 +271,7 @@ provider_signed_in() {
 # --------------------------------------------------------------------------- #
 step "Checking sign-in"
 # --------------------------------------------------------------------------- #
-if [[ -n "${ANTIGRAVITY_TOKEN:-}${COPILOT_GITHUB_TOKEN:-}${GH_TOKEN:-}${GITHUB_TOKEN:-}${ANTHROPIC_API_KEY:-}${CLAUDE_CODE_OAUTH_TOKEN:-}${OPENROUTER_MODEL:-}" ]]; then
+if provider_has_env_token; then
     ok "Using an auth token from the environment (unattended)"
 elif provider_signed_in; then
     ok "Already signed in"
@@ -279,7 +297,13 @@ elif [[ -t 0 ]]; then
     provider_signed_in || die "Still not signed in. Run '$BIN' to sign in, then re-run."
     ok "Signed in"
 else
-    die "Not signed in and no terminal to sign in on. Run '$BIN' once to sign in, or set ANTIGRAVITY_TOKEN / COPILOT_GITHUB_TOKEN / ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN as appropriate."
+    local token_hint
+    case "$AI_CLI" in
+        agy)     token_hint="ANTIGRAVITY_TOKEN" ;;
+        copilot) token_hint="COPILOT_GITHUB_TOKEN" ;;
+        claude)  token_hint="ANTHROPIC_API_KEY" ;;
+    esac
+    die "Not signed in and no terminal to sign in on. Run '$BIN' once to sign in, or set $token_hint as appropriate."
 fi
 # The feeder re-checks sign-in; we just verified it, so let it trust that.
 export ASSUME_SIGNED_IN=1

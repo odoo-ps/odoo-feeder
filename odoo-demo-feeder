@@ -422,15 +422,24 @@ provider_signed_in() {
     esac
 }
 if ! provider_signed_in; then
+    local token_hint
     case "$AI_CLI" in
-        agy)     SIGN_IN_HINT="Run '$AI_BIN' once and sign in with your Google account" ;;
-        copilot) SIGN_IN_HINT="Run '$AI_BIN login' to sign in" ;;
-        claude)  SIGN_IN_HINT="Run '$AI_BIN auth login' to sign in" ;;
+        agy)
+            SIGN_IN_HINT="Run '$AI_BIN' once and sign in with your Google account"
+            token_hint="ANTIGRAVITY_TOKEN"
+            ;;
+        copilot)
+            SIGN_IN_HINT="Run '$AI_BIN login' to sign in"
+            token_hint="COPILOT_GITHUB_TOKEN (or GH_TOKEN/GITHUB_TOKEN)"
+            ;;
+        claude)
+            SIGN_IN_HINT="Run '$AI_BIN auth login' to sign in"
+            token_hint="ANTHROPIC_API_KEY (or CLAUDE_CODE_OAUTH_TOKEN)"
+            ;;
     esac
     die "$AI_BIN does not seem to be signed in.
    $SIGN_IN_HINT, then re-run.
-   (For unattended / CI use, set ANTIGRAVITY_TOKEN, COPILOT_GITHUB_TOKEN,
-   ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN; to skip this check, set
+   (For unattended / CI use, set $token_hint; to skip this check, set
    ASSUME_SIGNED_IN=1.)"
 fi
 
