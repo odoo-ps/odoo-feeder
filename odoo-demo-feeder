@@ -631,7 +631,9 @@ fi
 REQUEST="You are populating an Odoo demo database for a sales demo.
 
 Follow the 'odoo-demo-csv' skill end to end — it defines the whole run and how to
-narrate it.
+narrate it. Load it before your first odoo-crud call. If it is not there, stop
+and say so in one line and make no call: the skill IS the run, and the database
+on the other end is a real one to be shown to a customer.
 
 ${SIZE_DIRECTIVE}${TARGET_DESC}
 
