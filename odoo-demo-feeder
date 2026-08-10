@@ -812,13 +812,12 @@ fi
 # Make the skill visible to agy as a WORKSPACE skill (.agents/skills under the
 # working dir). This is the unambiguous location agy reads, regardless of which
 # global dir the skills CLI used. $WORK is the agent's --chdir root.
-mkdir -p "$WORK/.agents/skills"
+mkdir -p "$WORK/.agents/skills" "$WORK/.claude/skills"
 for src in "$HOME/.agents/skills" "$HOME/.gemini/antigravity/skills"; do
     if [[ -d "$src" ]]; then
         cp -r "$src/." "$WORK/.agents/skills/" 2>/dev/null || true
-        # Also copy directly to the workspace root so other providers (like Claude Code)
-        # can access the skill files directly without sandbox bypass prompts.
-        cp -r "$src/." "$WORK/" 2>/dev/null || true
+        # Make skills visible to Claude Code as project-scoped skills
+        cp -r "$src/." "$WORK/.claude/skills/" 2>/dev/null || true
     fi
 done
 
