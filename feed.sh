@@ -28,6 +28,34 @@ AI_CLI="${AI_CLI:-agy}"
 # OpenRouter BYOK, 'copilot' only (see odoo-demo-feeder --help). Its presence
 # here just tells the sign-in probe below that no GitHub login is needed.
 OPENROUTER_MODEL="${OPENROUTER_MODEL:-}"
+
+# Parse options to detect AI_CLI and OPENROUTER_MODEL early, so we install and
+# check the right provider. We don't consume them (they must be forwarded to the feeder).
+idx=1
+while [[ $idx -le $# ]]; do
+    case "${!idx}" in
+        --ai-cli)
+            next_idx=$((idx + 1))
+            if [[ $next_idx -le $# ]]; then
+                AI_CLI="${!next_idx}"
+            fi
+            ;;
+        --ai-cli=*)
+            AI_CLI="${!idx#*=}"
+            ;;
+        --openrouter-model)
+            next_idx=$((idx + 1))
+            if [[ $next_idx -le $# ]]; then
+                OPENROUTER_MODEL="${!next_idx}"
+            fi
+            ;;
+        --openrouter-model=*)
+            OPENROUTER_MODEL="${!idx#*=}"
+            ;;
+    esac
+    idx=$((idx + 1))
+done
+
 RAW="https://raw.githubusercontent.com/${REPO}/${REPO_REF}"
 BIN_DIR="$HOME/.local/bin"
 DATA_DIR="$HOME/.local/share/odoo-demo-feeder"
