@@ -97,6 +97,13 @@ ui_input() {  # ui_input <label> [placeholder]
         local v; read -r -p "  $1${2:+ ($2)}: " v; printf '%s' "$v"
     fi
 }
+ui_input_value() {  # ui_input_value <label> [value]
+    if [[ "$HAS_GUM" -eq 1 ]]; then
+        gum input --prompt "$1 " --value "${2:-}"
+    else
+        local v; read -r -p "  $1${2:+ ($2)}: " v; printf '%s' "${v:-$2}"
+    fi
+}
 ui_password() {  # ui_password <label>
     if [[ "$HAS_GUM" -eq 1 ]]; then
         gum input --password --prompt "$1 "
@@ -500,7 +507,7 @@ while :; do
         info "Please re-enter your credentials."
         new_url=""
         while :; do
-            new_url="$(ui_input "Odoo URL" "$ODOO_URL")"
+            new_url="$(ui_input_value "Odoo URL" "$ODOO_URL")"
             new_url="${new_url%/}"
             if [[ -z "$new_url" ]]; then
                 break
@@ -510,17 +517,18 @@ while :; do
                 break
             fi
         done
+        local prev_login="$ODOO_LOGIN"
         ODOO_LOGIN=""
         ODOO_SECRET=""
         while [[ -z "$ODOO_LOGIN" ]]; do
-            ODOO_LOGIN="$(ui_input "Login (email or user)")"
+            ODOO_LOGIN="$(ui_input_value "Login (email or user)" "$prev_login")"
             [[ -n "$ODOO_LOGIN" ]] || warn "A login is required."
         done
         while [[ -z "$ODOO_SECRET" ]]; do
             ODOO_SECRET="$(ui_password "API key or password")"
             [[ -n "$ODOO_SECRET" ]] || warn "An API key or password is required."
         done
-        ODOO_DB="$(ui_input "Database name" "optional — needed for localhost, Enter to auto-detect")"
+        ODOO_DB="$(ui_input_value "Database name" "$ODOO_DB")"
     fi
 done
 
