@@ -785,7 +785,12 @@ fi
 # global dir the skills CLI used. $WORK is the agent's --chdir root.
 mkdir -p "$WORK/.agents/skills"
 for src in "$HOME/.agents/skills" "$HOME/.gemini/antigravity/skills"; do
-    [[ -d "$src" ]] && cp -r "$src/." "$WORK/.agents/skills/" 2>/dev/null || true
+    if [[ -d "$src" ]]; then
+        cp -r "$src/." "$WORK/.agents/skills/" 2>/dev/null || true
+        # Also copy directly to the workspace root so other providers (like Claude Code)
+        # can access the skill files directly without sandbox bypass prompts.
+        cp -r "$src/." "$WORK/" 2>/dev/null || true
+    fi
 done
 
 # Generate a self-contained launcher inside the scratch dir. It runs agy inside an
@@ -870,10 +875,10 @@ build_ai_argv() {
         claude)
             local allowed=("Bash(odoo-crud:*)" "Read" "Write" "WebFetch" "WebSearch")
             if [[ "$mode" == "interactive" ]]; then
-                AI_ARGV=("$AI_BIN" --model "$AI_MODEL" --permission-mode default \
-                    --allowed-tools "${allowed[@]}" --disallowed-tools "mcp__*" "$request")
+                AI_ARGV=("$AI_BIN" "$request" --model "$AI_MODEL" --permission-mode default \
+                    --allowed-tools "${allowed[@]}" --disallowed-tools "mcp__*")
             else
-                AI_ARGV=("$AI_BIN" -p "$request" --model "$AI_MODEL" --permission-mode default \
+                AI_ARGV=("$AI_BIN" "$request" -p --model "$AI_MODEL" --permission-mode default \
                     --allowed-tools "${allowed[@]}" --disallowed-tools "mcp__*")
                 command -v timeout >/dev/null 2>&1 && AI_ARGV=(timeout "$AGY_TIMEOUT" "${AI_ARGV[@]}")
             fi
