@@ -498,6 +498,18 @@ while :; do
         
         echo
         info "Please re-enter your credentials."
+        local new_url
+        while :; do
+            new_url="$(ui_input "Odoo URL" "$ODOO_URL")"
+            new_url="${new_url%/}"
+            if [[ -z "$new_url" ]]; then
+                break
+            fi
+            if check_url "$new_url"; then
+                ODOO_URL="$new_url"
+                break
+            fi
+        done
         ODOO_LOGIN=""
         ODOO_SECRET=""
         while [[ -z "$ODOO_LOGIN" ]]; do
