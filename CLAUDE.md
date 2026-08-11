@@ -22,14 +22,19 @@ Touch one, check the other two.
 
 ## A local skill edit does not reach a run
 
-Every run does `npx skills add "$SKILLS_REPO" --global --copy` from the public
-repo's **default branch**, overwrites `~/.agents/skills/odoo-demo-csv/`, then
-copies that into the sandbox workspace. The working tree is never read. To try a
-skill change: push it to main, or blank `SKILLS_REPO` (hardcoded near the top of
-`odoo-demo-feeder`) to keep the installed copy and edit that copy directly.
+Every run does `npx skills add "$SKILLS_REPO" --global --agent <id> --copy` from
+the public repo's **default branch** — `<id>` is the *skills-tool's own* id for
+whichever `--ai-cli` is driving the run (`provider_skill_agent` in
+`odoo-demo-feeder`; e.g. `claude-code`, not `claude`), so it lands under that
+provider's own global skills dir, then gets copied into the sandbox workspace.
+The working tree is never read. To try a skill change: push it to main, or
+blank `SKILLS_REPO` (hardcoded near the top of `odoo-demo-feeder`) to keep the
+installed copy and edit that copy directly.
 
-That copy is the whole directory, so reference files beside `SKILL.md` do reach
-the agent — and a pointer to one must survive any rename.
+`npx skills add` only ever places `SKILL.md` itself — it drops sibling
+reference files. `odoo-demo-feeder` fetches `ODOO-TRAPS.md` separately right
+after the `skills add` call to put it back beside `SKILL.md`; a new reference
+file needs the same explicit fetch added, it will not "just" come along.
 
 `CRUD_TOOL` is env-overridable, so `CRUD_TOOL=$PWD/odoo_crud.py odoo-demo-feeder`
 does test a local CRUD tool. `REPO_REF` only affects what `feed.sh` downloads

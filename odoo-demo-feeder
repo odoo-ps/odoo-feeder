@@ -280,6 +280,17 @@ provider_bin() {
         claude)  printf 'claude' ;;
     esac
 }
+# `npx skills add --agent <id>` installs into a directory keyed by this id (see
+# `npx skills add --help`'s "Valid agents" list) — it is NOT the same string as
+# provider_bin(). Getting this wrong means the skill lands in some other
+# provider's directory and the one actually running never sees it.
+provider_skill_agent() {
+    case "$AI_CLI" in
+        agy)     printf 'antigravity' ;;
+        copilot) printf 'github-copilot' ;;
+        claude)  printf 'claude-code' ;;
+    esac
+}
 provider_default_model() {
     case "$AI_CLI" in
         agy)
@@ -606,14 +617,29 @@ export ODOO_URL ODOO_LOGIN ODOO_SECRET ODOO_DB ODOO_SCOPE ODOO_SIZE COMPANY_NAME
 ui_header "Step 2/3 — Updating the AI skills..."
 
 # Refresh from the public repo, quietly (npx skills is very chatty), targeting
-# Antigravity only and copying files (symlinks would break inside the sandbox).
+# whichever AI CLI is actually driving this run and copying files (symlinks
+# would break inside the sandbox). `--agent` must be the CLI's OWN id in the
+# skills tool's registry (see provider_skill_agent) — installing under the
+# wrong agent id silently leaves this run's provider with no skill at all.
+SKILL_AGENT="$(provider_skill_agent)"
 if [[ -n "$SKILLS_REPO" ]] && command -v npx >/dev/null 2>&1; then
-    if npx -y skills add "$SKILLS_REPO" --global --agent antigravity --skill '*' --copy -y >/dev/null 2>&1; then
+    if npx -y skills add "$SKILLS_REPO" --global --agent "$SKILL_AGENT" --skill '*' --copy -y >/dev/null 2>&1; then
         info "  ✔ Skills up to date ($SKILLS_REPO)"
     else
         warn "Could not refresh skills from $SKILLS_REPO — using the installed copy."
     fi
 fi
+
+# `npx skills add` only ever places SKILL.md itself — sibling reference files
+# (ODOO-TRAPS.md) are not part of its sync, so fetch it separately into every
+# location the skill got installed to, keeping it beside SKILL.md.
+SKILL_RAW="https://raw.githubusercontent.com/${SKILLS_REPO:-odoo-ps/odoo-feeder}/main/odoo-demo-csv/ODOO-TRAPS.md"
+for skill_dir in "$HOME/.agents/skills/odoo-demo-csv" "$HOME/.claude/skills/odoo-demo-csv"; do
+    if [[ -d "$skill_dir" ]]; then
+        curl -fsSL "$SKILL_RAW" -o "$skill_dir/ODOO-TRAPS.md" 2>/dev/null \
+            || wget -qO "$skill_dir/ODOO-TRAPS.md" "$SKILL_RAW" 2>/dev/null || true
+    fi
+done
 
 # --- Restrict the agent to ONLY the CRUD tool ------------------------------- #
 # Install a single-name wrapper so the permission rule matches it exactly (a
@@ -809,15 +835,19 @@ with open(path, "w") as f:
 PY
 fi
 
-# Make the skill visible to agy as a WORKSPACE skill (.agents/skills under the
-# working dir). This is the unambiguous location agy reads, regardless of which
-# global dir the skills CLI used. $WORK is the agent's --chdir root.
+# Make the skill visible as a WORKSPACE skill (.agents/skills and .claude/skills
+# under the working dir) regardless of which global dir the skills CLI used for
+# the AI_CLI in question (see provider_skill_agent). $WORK is the agent's
+# --chdir root. Copy only this skill's own directory, not the whole source
+# tree — $HOME/.claude/skills in particular is the user's personal, global
+# Claude Code skill collection (their own project-specific skills), and a
+# wholesale copy would leak all of it into the sandboxed agent.
 mkdir -p "$WORK/.agents/skills" "$WORK/.claude/skills"
-for src in "$HOME/.agents/skills" "$HOME/.gemini/antigravity/skills"; do
+for src in "$HOME/.agents/skills/odoo-demo-csv" "$HOME/.gemini/antigravity/skills/odoo-demo-csv" "$HOME/.claude/skills/odoo-demo-csv"; do
     if [[ -d "$src" ]]; then
-        cp -r "$src/." "$WORK/.agents/skills/" 2>/dev/null || true
+        cp -r "$src" "$WORK/.agents/skills/" 2>/dev/null || true
         # Make skills visible to Claude Code as project-scoped skills
-        cp -r "$src/." "$WORK/.claude/skills/" 2>/dev/null || true
+        cp -r "$src" "$WORK/.claude/skills/" 2>/dev/null || true
     fi
 done
 
