@@ -930,7 +930,7 @@ export ODOO_CRUD_AUDIT_LOG="$HERE/.odoo-crud-calls.log"
 # anything the sandbox doesn't already allow.
 #
 # claude's tool restriction is also per-invocation: --allowed-tools scopes the
-# exact Bash pattern for the CRUD wrapper plus Read/Write/WebFetch/WebSearch;
+# exact Bash pattern for the CRUD wrapper plus Read/Write/Edit/WebFetch/WebSearch;
 # --disallowed-tools 'mcp__*' strips out any MCP servers the user's own global
 # ~/.claude config might define, so the allowlist can't be widened by config
 # already sitting on the machine. --permission-mode default is passed
@@ -958,7 +958,7 @@ build_ai_argv() {
             fi
             ;;
         claude)
-            local allowed=("Bash(odoo-crud:*)" "Read" "Write" "WebFetch" "WebSearch")
+            local allowed=("Bash(odoo-crud:*)" "Read" "Write" "Edit" "WebFetch" "WebSearch")
             if [[ "$mode" == "interactive" ]]; then
                 AI_ARGV=("$AI_BIN" "$request" --model "$AI_MODEL" --permission-mode default \
                     --allowed-tools "${allowed[@]}" --disallowed-tools "mcp__*")
