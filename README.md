@@ -45,6 +45,10 @@ Any key you write is understood (`apps` → modules to install, `data_size` → 
 free text is followed as instructions. Connection details (URL / login / secret)
 are always asked separately and never belong in a template.
 
+Ready-made templates for common demo profiles live in `templates/` (e.g.
+`--template templates/research-institute-hr.tpl`); copy one and adjust the
+`name` / `website` / `company_name` keys for the target prospect.
+
 The prompts use [`gum`](https://github.com/charmbracelet/gum) for a nicer interface
 when it is available, and fall back to plain prompts otherwise.
 
