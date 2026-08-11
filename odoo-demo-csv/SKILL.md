@@ -25,6 +25,14 @@ after each `odoo-crud` call carrying its result ("Imported 25 partners",
 "Preview found 1 bad column, fixing"). The sales person watches this output and
 sees nothing else of the run.
 
+**No real people** — every customer, vendor and lead you invent is a fictional
+person or company; ground truth only covers the target company itself (its real
+products, prices, photos). Never let an invented contact resemble a real one:
+emails go on a domain that cannot resolve (`example.com`, or `@<company>-demo.test`),
+phone numbers use a range reserved for fiction (e.g. `+1 555 0100`–`0199`, or a
+country's official drama/fake-number block) — never a real subscriber range.
+This applies to every `email`/`phone`/`mobile` column you write, in every model.
+
 ## The tool
 
 `odoo-crud <command> [options]` reaches Odoo over XML-RPC. It is the only shell
