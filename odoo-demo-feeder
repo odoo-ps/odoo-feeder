@@ -835,6 +835,33 @@ with open(path, "w") as f:
 PY
 fi
 
+# claude has the exact same first-time-per-directory trust dialog ("Do you
+# trust the files in this folder?"), keyed by the absolute cwd in ~/.claude.json
+# (projects["<path>"].hasTrustDialogAccepted). Headless -p mode has nowhere to
+# answer it, so an unanswered dialog can surface as the run looking stuck or
+# unauthenticated on a directory that is, in fact, a fresh mktemp path every
+# single time. Pre-accept it for $WORK the same way a human answering once
+# would, mirroring the agy block above.
+if [[ "$AI_CLI" == "claude" ]]; then
+    CLAUDE_CONFIG="$HOME/.claude.json"
+    python3 - "$CLAUDE_CONFIG" "$WORK" <<'PY' || true
+import json, sys
+path, work = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        data = {}
+except Exception:
+    data = {}
+projects = data.setdefault("projects", {})
+proj = projects.setdefault(work, {})
+proj["hasTrustDialogAccepted"] = True
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+PY
+fi
+
 # Make the skill visible as a WORKSPACE skill (.agents/skills and .claude/skills
 # under the working dir) regardless of which global dir the skills CLI used for
 # the AI_CLI in question (see provider_skill_agent). $WORK is the agent's
