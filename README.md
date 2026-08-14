@@ -11,8 +11,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/odoo-ps/odoo-feeder/main/fee
 bash <(wget -qO- https://raw.githubusercontent.com/odoo-ps/odoo-feeder/main/feed.sh)
 ```
 
-It installs what's missing (agy, bubblewrap, Node.js, Python, and optionally gum
-for nicer prompts), fetches the feeder, and runs it. You can pass the details as flags to skip the prompts:
+It installs what's missing (bubblewrap, Node.js, Python, and optionally gum for
+nicer prompts), asks which AI CLI should drive the agent and installs just that
+one, fetches the feeder, and runs it. You can pass the details as flags to skip
+the prompts:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/odoo-ps/odoo-feeder/main/feed.sh) \
@@ -20,7 +22,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/odoo-ps/odoo-feeder/main/fee
   --scope "Bakery" --company "Maison Rorive" --website https://www.maisonrorive.be
 ```
 
-> First run only: launch `agy` once and sign in with Google.
+> First run only: launch the CLI you picked once and sign in (`agy` with Google,
+> `copilot` with GitHub, `claude` with Anthropic).
 > The public `odoo.com` site is blocked as a target.
 
 ## Templates
@@ -50,9 +53,12 @@ when it is available, and fall back to plain prompts otherwise.
 
 ## AI CLI providers
 
-By default the feeder drives [`agy`](https://antigravity.google) (Antigravity). Pass
-`--ai-cli copilot` (GitHub Copilot CLI) or `--ai-cli claude` (Claude Code) to use a
-different one.
+Three are supported: [`agy`](https://antigravity.google) (Antigravity),
+`copilot` (GitHub Copilot CLI) and `claude` (Claude Code). The bootstrap asks
+which one you want and installs only that one; `--ai-cli copilot` or
+`AI_CLI=copilot` answers ahead of time, and `agy` is the fallback when there is
+no terminal to ask on. The feeder itself still defaults to `agy` when run
+directly.
 
 `copilot` can also be routed through [OpenRouter](https://openrouter.ai) instead of
 GitHub's own model routing, via Copilot's BYOK support. The API key is never passed

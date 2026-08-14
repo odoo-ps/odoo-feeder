@@ -11,10 +11,11 @@
 #
 #   bash <(curl -fsSL .../feed.sh) --url https://mycompany.odoo.com --login admin ...
 #
-# It installs what is missing (agy, bubblewrap, Node.js, Python, optionally gum
-# for nicer prompts), fetches the
-# latest feeder + CRUD tool, then launches. Re-running is cheap: anything already
-# present is skipped.
+# It installs what is missing (bubblewrap, Node.js, Python, optionally gum for
+# nicer prompts), asks which AI CLI should drive the agent and installs that one
+# alone, fetches the latest feeder + CRUD tool, then launches. Re-running is
+# cheap: anything already present is skipped. Pre-answer the question with
+# AI_CLI=copilot or --ai-cli copilot and it is not asked.
 #
 set -euo pipefail
 
@@ -22,9 +23,11 @@ REPO="odoo-ps/odoo-feeder"
 # Git ref (branch, tag or commit) to fetch the feeder + CRUD tool from. Defaults
 # to main; override to test a branch, e.g. REPO_REF=imp-gum-templates.
 REPO_REF="${REPO_REF:-main}"
-# Which AI CLI drives the agent: "agy" (Antigravity, default), "copilot"
-# (GitHub Copilot CLI) or "claude" (Claude Code).
-AI_CLI="${AI_CLI:-agy}"
+# Which AI CLI drives the agent: "agy" (Antigravity), "copilot" (GitHub Copilot
+# CLI) or "claude" (Claude Code). Exactly one is installed. Left empty, the
+# bootstrap asks — installing a CLI nobody picked is the thing to avoid, so the
+# default is a question, not a provider.
+AI_CLI="${AI_CLI:-}"
 # OpenRouter BYOK, 'copilot' only (see odoo-demo-feeder --help). Its presence
 # here just tells the sign-in probe below that no GitHub login is needed.
 OPENROUTER_MODEL="${OPENROUTER_MODEL:-}"
@@ -154,12 +157,53 @@ ensure_gum() {
 # and claude (Claude Code) are implemented. Unknown providers fail fast,
 # before any install or network work happens.
 # --------------------------------------------------------------------------- #
+# Empty is legal here and means "ask below"; anything else has to be real.
 provider_supported() {
     case "$AI_CLI" in
-        agy|copilot|claude) ;;
+        ""|agy|copilot|claude) ;;
         *)      die "Unknown AI_CLI='$AI_CLI'. Only 'agy', 'copilot' and 'claude' are supported today." ;;
     esac
 }
+
+# This run forwards "$@" to the feeder, which takes --ai-cli. Read it here too,
+# or the bootstrap installs one CLI and the feeder launches a different one.
+ai_cli_from_args() {
+    local want="" a
+    for a in "$@"; do
+        [[ -n "$want" ]] && { printf '%s' "$a"; return 0; }
+        case "$a" in
+            --ai-cli=*) printf '%s' "${a#*=}"; return 0 ;;
+            --ai-cli)   want=1 ;;
+        esac
+    done
+    return 1
+}
+
+# choose_ai_cli — ask which one to install. Prints the bare provider name.
+choose_ai_cli() {
+    local labels=("agy — Antigravity" "copilot — GitHub Copilot CLI" "claude — Claude Code")
+    local pick=""
+    if command -v gum >/dev/null 2>&1; then
+        # '|| true': a cancelled or failed gum must fall through to the default
+        # below, not abort the bootstrap under set -e.
+        pick="$(gum choose --header "Which AI CLI should drive the agent?" "${labels[@]}" || true)"
+    else
+        printf '%s\n' "  Which AI CLI should drive the agent?" >&2
+        local i=1 l
+        for l in "${labels[@]}"; do printf '    %d) %s\n' "$i" "$l" >&2; i=$((i+1)); done
+        local n; read -r -p "  Choice [1]: " n
+        case "${n:-1}" in
+            2) pick="${labels[1]}" ;;
+            3) pick="${labels[2]}" ;;
+            *) pick="${labels[0]}" ;;
+        esac
+    fi
+    # Ctrl-C out of gum leaves this empty; fall back rather than install nothing.
+    [[ -n "$pick" ]] || pick="${labels[0]}"
+    printf '%s' "${pick%% *}"
+}
+
+[[ -n "$AI_CLI" ]] || AI_CLI="$(ai_cli_from_args "$@" || true)"
 provider_bin() {
     case "$AI_CLI" in
         agy)     printf 'agy' ;;
@@ -192,6 +236,21 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
     ensure_cmd bwrap bubblewrap       ::: bubblewrap
 fi
 ensure_gum                            # optional: nicer prompts, plain fallback
+
+# --------------------------------------------------------------------------- #
+# Which AI CLI to install — asked here, after gum is available to ask with and
+# before anything provider-specific is fetched. Already answered by AI_CLI or
+# --ai-cli, and nothing is asked.
+# --------------------------------------------------------------------------- #
+if [[ -z "$AI_CLI" ]]; then
+    if [[ -t 0 ]]; then
+        AI_CLI="$(choose_ai_cli)"
+    else
+        AI_CLI="agy"
+        warn "No terminal to ask on — installing agy. Set AI_CLI to choose."
+    fi
+fi
+provider_supported
 
 # --------------------------------------------------------------------------- #
 step "Installing the AI CLI ($AI_CLI)"
