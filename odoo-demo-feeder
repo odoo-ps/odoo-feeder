@@ -16,9 +16,14 @@ set -euo pipefail
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
+# Where this script is running from. When it is a checkout, the skill directory
+# beside it is the one the agent gets (see "Updating the AI skills" below).
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+
 # Public GitHub repo (owner/repo) holding the demo skills, pulled via `npx skills`.
+# Only reached by a standalone install — a checkout deploys its own skill first.
 # Set it empty (SKILLS_REPO= odoo-demo-feeder) to skip the remote refresh and run
-# whatever is already in ~/.agents/skills — the way to try a skill edit unpushed.
+# whatever is already in ~/.agents/skills.
 SKILLS_REPO="${SKILLS_REPO-odoo-ps/odoo-feeder}"
 
 # The one-line bootstrap that installs every dependency and fetches this tool.
@@ -505,14 +510,36 @@ export ODOO_URL ODOO_LOGIN ODOO_SECRET ODOO_DB ODOO_SCOPE ODOO_SIZE COMPANY_NAME
 # --------------------------------------------------------------------------- #
 ui_header "Step 2/3 — Updating the AI skills..."
 
-# Refresh from the public repo, quietly (npx skills is very chatty), targeting
-# Antigravity only and copying files (symlinks would break inside the sandbox).
-if [[ -n "$SKILLS_REPO" ]] && command -v npx >/dev/null 2>&1; then
-    if npx -y skills add "$SKILLS_REPO" --global --agent antigravity --skill '*' --copy -y >/dev/null 2>&1; then
-        info "  ✔ Skills up to date ($SKILLS_REPO)"
+# Where the skill the agent reads comes from, first match winning:
+#   1. the skill directory beside this script — running from a checkout means
+#      that checkout is what you get, so an edit reaches the agent without a
+#      push, and nothing silently substitutes the default branch for it;
+#   2. the public repo's default branch, via npx skills, for a standalone
+#      install that has no checkout to read;
+#   3. whatever is already installed.
+# Whichever wins says so: a run against a skill you did not mean to use looks
+# exactly like a run against the one you did.
+SKILL_SRC="$SCRIPT_DIR/odoo-demo-csv"
+SKILL_DEST="${HOME:?HOME must be set to deploy the skill}/.agents/skills/odoo-demo-csv"
+if [[ -f "$SKILL_SRC/SKILL.md" ]]; then
+    # Replace rather than merge: a copy left behind by an older version — a
+    # reference file since renamed — would otherwise stay and be read.
+    rm -rf -- "$SKILL_DEST"
+    if mkdir -p "$SKILL_DEST" && cp -r "$SKILL_SRC/." "$SKILL_DEST/"; then
+        info "  ✔ Skills from this checkout ($SKILL_SRC)"
     else
-        warn "Could not refresh skills from $SKILLS_REPO — using the installed copy."
+        die "Could not deploy the skill from $SKILL_SRC to $SKILL_DEST."
     fi
+elif [[ -z "$SKILLS_REPO" ]]; then
+    info "  ✔ Skills refresh skipped — using the installed copy."
+elif ! command -v npx >/dev/null 2>&1; then
+    warn "npx is missing, so the skills were NOT refreshed — using the installed copy."
+# Quietly: npx skills is very chatty. Antigravity only, and copying files
+# (symlinks would break inside the sandbox).
+elif npx -y skills add "$SKILLS_REPO" --global --agent antigravity --skill '*' --copy -y >/dev/null 2>&1; then
+    info "  ✔ Skills up to date ($SKILLS_REPO, default branch)"
+else
+    warn "Could not refresh skills from $SKILLS_REPO — using the installed copy."
 fi
 
 # --- Restrict the agent to ONLY the CRUD tool ------------------------------- #
@@ -685,8 +712,13 @@ mkdir -p "$HOME/.gemini" "$HOME/.copilot" "$HOME/.claude" "$HOME/.cache"
 # Make the skill visible to agy as a WORKSPACE skill (.agents/skills under the
 # working dir). This is the unambiguous location agy reads, regardless of which
 # global dir the skills CLI used. $WORK is the agent's --chdir root.
+#
+# ~/.agents/skills is copied LAST because it is where the deploy above landed:
+# these copies overwrite each other by filename, so whatever comes last is what
+# the agent reads. A machine carrying an older odoo-demo-csv under ~/.gemini
+# used to win here and silently replace the skill that had just been deployed.
 mkdir -p "$WORK/.agents/skills"
-for src in "$HOME/.agents/skills" "$HOME/.gemini/antigravity/skills"; do
+for src in "$HOME/.gemini/antigravity/skills" "$HOME/.agents/skills"; do
     [[ -d "$src" ]] && cp -r "$src/." "$WORK/.agents/skills/" 2>/dev/null || true
 done
 
