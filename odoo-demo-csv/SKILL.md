@@ -68,28 +68,33 @@ module defining them is in, so these run in order.
 
 - `odoo-crud auth-check` — first command of the run. If it fails, stop and say
   why; nothing downstream can work.
-- The **industry** module configures the database for the trade the target is
-  in — its apps, its reports, its own sample records — and one of them fits
-  almost every business a sales person will name. Match step 1's research
-  against [`INDUSTRY-MODULES.md`](INDUSTRY-MODULES.md) and pick the one that
-  fits.
-- `odoo-crud install-modules bakery crm stock sale_management account` — that
-  industry module plus every module behind step 5's import order, in ONE call.
-  Read the base list straight off that order: `res.partner` → `contacts`,
-  `product.template` → `product` and `sale_management`, stock on hand →
-  `stock`, `crm.lead` → `crm`, plus `account` for invoicing. It installs *and*
-  confirms before returning, and its JSON lists `not_installed` for anything
-  that failed.
+- `odoo-crud install-industry bakery` — the **industry** module for the trade
+  the target is in, which configures the database for that business and brings
+  its sample records. Match step 1's research against
+  [`INDUSTRY-MODULES.md`](INDUSTRY-MODULES.md) and install the one that fits.
+  It takes exactly one, and it is a separate command because these modules are
+  downloaded from apps.odoo.com rather than found on the addons path —
+  `install-modules` cannot see them at all.
+  An industry that needs modules this database does not have fails here and
+  names them; that is a Community database being asked for Enterprise ones. Say
+  so in one line and carry on with the base modules — the run still works.
+- `odoo-crud install-modules crm stock sale_management account` — every module
+  behind step 5's import order, in ONE call. Read the list straight off that
+  order: `res.partner` → `contacts`, `product.template` → `product` and
+  `sale_management`, stock on hand → `stock`, `crm.lead` → `crm`, plus
+  `account` for invoicing. It installs *and* confirms before returning, and its
+  JSON lists `not_installed` for anything that failed.
 - `odoo-crud models --filter crm` — which models the install actually gave you.
 - `odoo-crud fields product.template --filter 'name,list_price,barcode'` — one
   compact line per field (`many2one required -> res.partner`), including a
   selection field's allowed values. Filter by the columns you plan to write;
   dumping every field of `res.partner` or `product.template` buries the answer.
 
-*Done when* `install-modules` has come back with `not_installed` empty — the
-industry module among them — and every column of every CSV you are about to
-write has appeared in a `fields` output, with its type and — for selection
-fields — its allowed values copied verbatim.
+*Done when* the industry module is installed or you have said in one line why
+it could not be, `install-modules` has come back with `not_installed` empty,
+and every column of every CSV you are about to write has appeared in a `fields`
+output, with its type and — for selection fields — its allowed values copied
+verbatim.
 
 ### 3. Configure the company
 

@@ -492,6 +492,87 @@ def cmd_install_modules(args):
     })
 
 
+def _ensure_base_import_module():
+    """Make sure the module providing the industry download path is installed.
+
+    button_immediate_install_app lives in base_import_module. Without it the
+    call fails as a bare "no such method" fault, which says nothing about the
+    cause. It ships with Odoo and installs like any other local module, so
+    install it rather than report it.
+    """
+    recs = execute(
+        "ir.module.module", "search_read",
+        [[["name", "=", "base_import_module"]]], {"fields": ["state"]},
+    )
+    if not recs:
+        fail("This database has no 'base_import_module', so industry modules "
+             "cannot be downloaded from apps.odoo.com.")
+    if recs[0]["state"] != "installed":
+        execute("ir.module.module", "button_immediate_install", [[recs[0]["id"]]])
+
+
+def cmd_install_industry(args):
+    """Install an industry module, which does not live on the addons path.
+
+    install-modules cannot reach these: there is no ir.module.module row to
+    install, because the module is not local. It is downloaded from
+    apps.odoo.com, and the Apps UI does that in three steps, which this mirrors:
+
+      1. button_immediate_install_app downloads the zip for this Odoo version,
+         checks its dependencies against this database and returns an action
+         pointing at a base.import.module wizard;
+      2. tick the wizard's "Load demo data" box;
+      3. press its Install button (import_module).
+
+    Step 2 is the one that matters for a demo. The industry's sample records —
+    the products, partners and configured screens that make a database look
+    like a going concern — ride on the wizard's with_demo field alone, so
+    without it the module installs as bare configuration.
+
+    Dependencies are validated before anything is installed, and an industry
+    depending on modules this database does not have (typically Enterprise ones
+    on a Community database) fails there, naming them.
+    """
+    name = args.module
+    _ensure_base_import_module()
+
+    existing = execute(
+        "ir.module.module", "search_read",
+        [[["name", "=", name]]], {"fields": ["state"]},
+    )
+    if existing and existing[0]["state"] == "installed":
+        ok({"module": name, "state": "installed", "already_installed": True,
+            "with_demo": None})
+
+    action = execute(
+        "ir.module.module", "button_immediate_install_app", [[]],
+        {"context": {"module_name": name}},
+    )
+    wizard_id = action.get("res_id") if isinstance(action, dict) else None
+    if not wizard_id:
+        fail(f"Downloading industry '{name}' returned no install wizard. Check "
+             f"the name against the industry list — it must be the technical "
+             f"one, e.g. 'bakery'.")
+
+    # Default on: this tool exists to fill a demo database, and the sample
+    # records are the visible half of an industry module.
+    with_demo = not args.no_demo
+    if with_demo:
+        execute("base.import.module", "write", [[wizard_id], {"with_demo": True}])
+    execute("base.import.module", "import_module", [[wizard_id]])
+
+    final = execute(
+        "ir.module.module", "search_read",
+        [[["name", "=", name]]], {"fields": ["name", "state"]},
+    )
+    state = final[0]["state"] if final else None
+    result = {"module": name, "state": state, "already_installed": False,
+              "with_demo": with_demo}
+    if state != "installed":
+        fail_result(result)
+    ok(result)
+
+
 def cmd_set_image(args):
     """Download an image (or read a local file) and set it on a record.
 
@@ -802,6 +883,26 @@ def build_parser():
     )
     p.add_argument("modules", nargs="+", help="Technical module names, e.g. crm stock.")
 
+    p = sub.add_parser(
+        "install-industry",
+        help="Install ONE industry module, downloaded from apps.odoo.com.",
+        description=(
+            "Industry modules (bakery, hotel, industry_lawyer...) are not on the addons "
+            "path, so install-modules cannot see them. This downloads the one "
+            "named, loads its demo data, and installs it — the same three steps "
+            "the Apps screen takes. Blocking: it returns installed or failed. An "
+            "industry needing modules this database lacks (often Enterprise ones) "
+            "fails before installing anything, naming what is missing."
+        ),
+    )
+    p.add_argument("module", help="ONE technical industry name, e.g. bakery.")
+    p.add_argument(
+        "--no-demo", action="store_true",
+        help="Install the configuration without the industry's sample records. "
+             "They are loaded by default: they are what makes the database look "
+             "like a running business.",
+    )
+
     p = sub.add_parser("set-image", help="Set a record image from a URL or file.")
     p.add_argument("model")
     p.add_argument("--id", type=int, required=True, help="Record id.")
@@ -835,6 +936,7 @@ HANDLERS = {
     "models": cmd_models,
     "fields": cmd_fields,
     "install-modules": cmd_install_modules,
+    "install-industry": cmd_install_industry,
     "set-image": cmd_set_image,
     "import-preview": cmd_import_preview,
     "import-csv": cmd_import_csv,

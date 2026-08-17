@@ -1,14 +1,14 @@
 # Industry modules
 
 Odoo ships one module per trade. Installing it configures the database *for that
-business* — the apps it needs, its reports, its way of selling — and Odoo pulls
-the whole dependency chain in behind it. So the industry module is the only extra
-name `install-modules` needs.
+business* — the apps it needs, its reports, its way of selling — and pulls the
+whole dependency chain in behind it.
 
-Pick the **one** module closest to the target's trade and add it to that call.
-The headings narrow the list; each description is written to separate the
-neighbours that share a word (`bakery` and `cake_shop`, `hotel` and
-`guest_house`, `real_estate` and `industry_real_estate`).
+Pick the **one** module closest to the target's trade and install it with
+`odoo-crud install-industry <name>`. The headings narrow the list; each
+description is written to separate the neighbours that share a word (`bakery`
+and `cake_shop`, `hotel` and `guest_house`, `real_estate` and
+`industry_real_estate`).
 
 No module fits? Install the run's base modules alone and say so in one line. A
 trade forced into the wrong industry module configures the database against the
@@ -21,6 +21,14 @@ a configured point of sale. That is the point of it, and it is why the database
 is not empty when you start importing: your CSV rows land *beside* those
 records. Ground truth is unchanged — everything *you* write still traces back to
 the target's own site.
+
+Two things follow from where these modules come from. They are downloaded from
+apps.odoo.com at install time rather than read off the addons path, so the
+database needs to reach it, and the name you pass has to be the technical one
+below. And their dependencies are checked against this database first: an
+industry wanting modules it does not have — Enterprise ones on a Community
+database — fails before installing anything and names them. That is a fact
+about the database, not a wrong pick, so say it in one line and carry on.
 
 ## Retail
 
