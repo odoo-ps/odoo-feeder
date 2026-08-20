@@ -24,6 +24,7 @@ machine-readable feedback it can reason about (e.g. to debug a failing import).
 """
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -562,6 +563,146 @@ def cmd_resolve(args):
     ok(result)
 
 
+def cmd_bill_po(args):
+    """Turn purchase orders into posted vendor bills.
+
+    action_create_invoice on its own gives a draft with every quantity at 0 and
+    a total of 0, because a product's Control Policy defaults to billing on
+    *received* quantities and a demo never receives the goods. Odoo is right to
+    refuse; the bill is simply not a bill. Getting a real one took switching the
+    policy, writing each line's quantity, adding a vendor reference and an
+    invoice date, and only then posting — five steps between a green call and a
+    document worth showing.
+
+    All of it, in order:
+      1. confirm any order still a draft RFQ — only a confirmed one bills;
+      2. switch its products to bill on ordered quantities, so Odoo fills the
+         quantities itself rather than being patched afterwards;
+      3. action_create_invoice;
+      4. fill anything still at 0 from its purchase order line;
+      5. set ref and invoice_date, both of which posting requires;
+      6. post, unless asked not to.
+    """
+    ids = parse_json(args.ids, "--ids")
+    if not isinstance(ids, list) or not ids:
+        fail("--ids must be a non-empty JSON array of purchase.order ids.")
+
+    orders = execute(
+        "purchase.order", "search_read", [[["id", "in", ids]]],
+        {"fields": ["name", "state"]},
+    )
+    if not orders:
+        fail(f"No purchase.order found for ids {ids}.")
+    found = {o["id"] for o in orders}
+    missing = [i for i in ids if i not in found]
+
+    # 1. A draft RFQ cannot be billed.
+    to_confirm = [o["id"] for o in orders if o["state"] in ("draft", "sent")]
+    if to_confirm:
+        execute("purchase.order", "button_confirm", [to_confirm])
+
+    # 2. Bill control. Left on 'receive', step 3 produces the zero-quantity
+    #    draft; flipping it first means Odoo computes the quantities.
+    lines = execute(
+        "purchase.order.line", "search_read", [[["order_id", "in", ids]]],
+        {"fields": ["product_id", "product_qty", "order_id"]},
+    )
+    policy_changed = []
+    if lines and not args.keep_bill_control:
+        product_ids = sorted({l["product_id"][0] for l in lines if l.get("product_id")})
+        prods = execute(
+            "product.product", "search_read", [[["id", "in", product_ids]]],
+            {"fields": ["product_tmpl_id", "purchase_method"]},
+        )
+        tmpl_ids = sorted({
+            p["product_tmpl_id"][0] for p in prods
+            if p.get("product_tmpl_id") and p.get("purchase_method") != "purchase"
+        })
+        if tmpl_ids:
+            execute("product.template", "write",
+                    [tmpl_ids, {"purchase_method": "purchase"}])
+            policy_changed = tmpl_ids
+
+    # 3. Create the drafts.
+    execute("purchase.order", "action_create_invoice", [ids])
+
+    after = execute(
+        "purchase.order", "search_read", [[["id", "in", ids]]],
+        {"fields": ["name", "state", "invoice_ids"]},
+    )
+    move_ids = sorted({m for o in after for m in (o.get("invoice_ids") or [])})
+    if not move_ids:
+        fail_result({
+            "orders": after, "bills": [],
+            "error": "action_create_invoice produced no bill. Every line may "
+                     "already be invoiced, or the orders were not confirmed.",
+        })
+
+    # 4. Anything still at zero gets its quantity from the order line it came
+    #    from — the case step 2 cannot reach, e.g. a partly-invoiced line.
+    qty_by_line = {l["id"]: l["product_qty"] for l in lines}
+    mlines = execute(
+        "account.move.line", "search_read",
+        [[["move_id", "in", move_ids], ["purchase_line_id", "!=", False]]],
+        {"fields": ["quantity", "purchase_line_id", "move_id"]},
+    )
+    patched = 0
+    for ml in mlines:
+        if ml.get("quantity"):
+            continue
+        want = qty_by_line.get((ml.get("purchase_line_id") or [None])[0])
+        if want:
+            execute("account.move.line", "write", [[ml["id"]], {"quantity": want}])
+            patched += 1
+
+    # 5. Posting refuses a vendor bill with no date, and a bill with no vendor
+    #    reference is not one a customer would accept either.
+    moves = execute(
+        "account.move", "search_read", [[["id", "in", move_ids]]],
+        {"fields": ["name", "state", "ref", "invoice_date", "partner_id"]},
+    )
+    today = datetime.date.today().isoformat()
+    order_name = {o["id"]: o["name"] for o in after}
+    for mv in moves:
+        vals = {}
+        if not mv.get("ref"):
+            vals["ref"] = args.ref or "BILL-%s" % (
+                order_name.get(ids[0], mv.get("name") or "PO")
+            )
+        if not mv.get("invoice_date"):
+            vals["invoice_date"] = args.date or today
+        if vals and mv.get("state") == "draft":
+            execute("account.move", "write", [[mv["id"]], vals])
+
+    # 6. Post.
+    if not args.no_post:
+        draft = [m["id"] for m in moves if m.get("state") == "draft"]
+        if draft:
+            execute("account.move", "action_post", [draft])
+
+    final = execute(
+        "account.move", "search_read", [[["id", "in", move_ids]]],
+        {"fields": ["name", "state", "ref", "invoice_date", "amount_total"]},
+    )
+    result = {
+        "orders_confirmed": to_confirm,
+        "bill_control_switched": policy_changed,
+        "lines_patched": patched,
+        "bills": final,
+        "missing_orders": missing,
+        "posted": not args.no_post,
+    }
+    unposted = [m for m in final if not args.no_post and m.get("state") != "posted"]
+    zero = [m for m in final if not m.get("amount_total")]
+    if unposted or zero:
+        result["error"] = (
+            "Bills came back unposted or with a zero total — the demo would show "
+            "an empty document."
+        )
+        fail_result(result)
+    ok(result)
+
+
 def _ensure_base_import_module():
     """Make sure the module providing the industry download path is installed.
 
@@ -998,6 +1139,33 @@ def build_parser():
              "records this run imported, which is where import-csv files them.",
     )
 
+    p = sub.add_parser(
+        "bill-po",
+        help="Turn purchase orders into POSTED vendor bills.",
+        description=(
+            "action_create_invoice alone returns a draft with every quantity at "
+            "0 and a total of 0: a product's Control Policy bills on RECEIVED "
+            "quantities by default, and a demo receives nothing. This does the "
+            "whole sequence — confirm the RFQ, switch the products to bill on "
+            "ordered quantities, create, fill any line still at 0 from its "
+            "order line, set the vendor reference and invoice date that posting "
+            "requires, then post. It fails if a bill ends up unposted or at "
+            "zero, because that document is empty on screen."
+        ),
+    )
+    p.add_argument("--ids", required=True,
+                   help="JSON array of purchase.order ids, e.g. '[3,4]'.")
+    p.add_argument("--ref", help="Vendor reference for the bills. Defaults to "
+                                "one derived from the order name.")
+    p.add_argument("--date", help="Invoice date, YYYY-MM-DD. Defaults to today.")
+    p.add_argument("--no-post", action="store_true",
+                   help="Stop at a complete draft instead of posting. The "
+                        "reports stay empty until it is posted.")
+    p.add_argument("--keep-bill-control", action="store_true",
+                   help="Leave each product's Control Policy alone. The bill "
+                        "then covers only received quantities, which in a demo "
+                        "is usually none of them.")
+
     p = sub.add_parser("set-image", help="Set a record image from a URL or file.")
     p.add_argument("model")
     p.add_argument("--id", type=int, required=True, help="Record id.")
@@ -1033,6 +1201,7 @@ HANDLERS = {
     "install-modules": cmd_install_modules,
     "install-industry": cmd_install_industry,
     "resolve": cmd_resolve,
+    "bill-po": cmd_bill_po,
     "set-image": cmd_set_image,
     "import-preview": cmd_import_preview,
     "import-csv": cmd_import_csv,
