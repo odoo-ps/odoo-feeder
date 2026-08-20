@@ -57,7 +57,6 @@ EXTRA="${EXTRA:-}"
 ODOO_SIZE="${ODOO_SIZE:-}"   # small | medium | big (dataset volume)
 ODOO_LANG="${ODOO_LANG:-}"      # language the demo data is written in
 ODOO_COUNTRY="${ODOO_COUNTRY:-}"  # country and currency, e.g. "Vietnam (VND)"
-ODOO_FLAGSHIP="${ODOO_FLAGSHIP:-}"  # one product or vendor to put front and centre
 # Which end-to-end flows the data has to support, comma-separated. Keys:
 #   trading    — confirmed SO raises the PO, invoice and vendor bill wired up
 #   mrp        — BoMs, and a confirmed SO triggering an MO plus component PO
@@ -281,7 +280,6 @@ Content:
                         component PO), accounting (post them so the reports
                         fill in), analytics (spread over a rolling 90 days).
                         'all' selects every one, 'none' selects nothing.
-  --flagship TEXT       One product or vendor to feature  [ODOO_FLAGSHIP]
   --notes TEXT          Extra free-text instructions for the AI  [EXTRA]
                         e.g. "also create 5 sales orders and a few invoices"
   --template FILE       Load a template file describing the demo to build and
@@ -337,7 +335,6 @@ while [[ $# -gt 0 ]]; do
         --language|--lang)     need_val "$1" "${2:-}"; ODOO_LANG="$2";    GAVE_ARGS=1; shift 2 ;;
         --country)             need_val "$1" "${2:-}"; ODOO_COUNTRY="$2"; GAVE_ARGS=1; shift 2 ;;
         --workflows|--flows)   need_val "$1" "${2:-}"; ODOO_FLOWS="$2";   GAVE_ARGS=1; shift 2 ;;
-        --flagship)            need_val "$1" "${2:-}"; ODOO_FLAGSHIP="$2"; GAVE_ARGS=1; shift 2 ;;
         --notes|--extra)       need_val "$1" "${2:-}"; EXTRA="$2";        GAVE_ARGS=1; shift 2 ;;
         --template)            need_val "$1" "${2:-}"; TEMPLATE_FILE="$2"; GAVE_ARGS=1; shift 2 ;;
         --ai-cli)              need_val "$1" "${2:-}"; AI_CLI="$2";        shift 2 ;;
@@ -735,7 +732,6 @@ if [[ -z "$TEMPLATE_TEXT" ]]; then
         [[ -n "$ODOO_LANG" ]]    || ODOO_LANG="$(ui_input "Demo language" "optional, e.g. English, Vietnamese, French")"
         [[ -n "$ODOO_COUNTRY" ]] || ODOO_COUNTRY="$(ui_input "Country & currency" "optional, e.g. Vietnam (VND) — Enter to take it from the website")"
         [[ -n "$ODOO_FLOWS" ]]   || ODOO_FLOWS="$(ask_workflows)"
-        [[ -n "$ODOO_FLAGSHIP" ]] || ODOO_FLAGSHIP="$(ui_input "Flagship product or vendor to feature" "optional, e.g. Oak Dining Table")"
         [[ -n "$EXTRA" ]]        || EXTRA="$(ui_input "Anything else the AI should do?" "optional, e.g. also create 5 sales orders")"
     fi
 
@@ -934,10 +930,6 @@ fi
 if [[ -n "$ODOO_COUNTRY" ]]; then
     INTAKE_DESC+="
   Country & currency: ${ODOO_COUNTRY} — set both on res.company."
-fi
-if [[ -n "$ODOO_FLAGSHIP" ]]; then
-    INTAKE_DESC+="
-  Feature prominently: ${ODOO_FLAGSHIP}."
 fi
 [[ -z "$INTAKE_DESC" ]] || INTAKE_DESC="
 ${INTAKE_DESC}
