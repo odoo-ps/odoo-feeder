@@ -152,6 +152,25 @@ ensure_bwrap_works() {
     return 0
 }
 
+OPENROUTER_KEYRING_SERVICE="odoo-feeder"
+OPENROUTER_KEYRING_ACCOUNT="openrouter-api-key"
+
+# copilot on OpenRouter needs an API key in the OS keyring, and the feeder stops
+# dead without it. Install the tool, ask for the key, store it there — never a
+# flag or an env var, so it stays out of the process list and the history.
+ensure_openrouter_key() {
+    [[ "$AI_CLI" == "copilot" && -n "$OPENROUTER_MODEL" ]] || return 0
+    ensure_cmd keyring python3-keyring ::: python3-keyring ::: keyring
+    local key=""
+    read -r -s -p "  OpenRouter API key (Enter to keep the stored one): " key || true
+    printf '\n'
+    [[ -n "$key" ]] || return 0
+    # keyring set takes the value on stdin when stdin is not a terminal, which
+    # keeps the key off the command line.
+    printf '%s' "$key" | keyring set "$OPENROUTER_KEYRING_SERVICE" "$OPENROUTER_KEYRING_ACCOUNT" \
+        && ok "OpenRouter API key stored"
+}
+
 # gum powers the nicer prompts, but it is OPTIONAL — the feeder falls back to
 # plain prompts without it, so every failure here is a warning, never fatal.
 # Prefer real packages: dnf ships gum directly; Debian/Ubuntu need Charm's own
@@ -322,6 +341,10 @@ else
     command -v "$BIN" >/dev/null 2>&1 && { provider_post_install; ok "$BIN installed"; } \
         || warn "$BIN installed but not on PATH yet — open a new terminal and run '$BIN' once to log in."
 fi
+
+# The key the default path needs, asked for before the sign-in probe — which
+# with BYOK reports success without ever touching it.
+ensure_openrouter_key
 
 # --------------------------------------------------------------------------- #
 # Whether the provider CLI can actually reach its backend (i.e. is signed in).
