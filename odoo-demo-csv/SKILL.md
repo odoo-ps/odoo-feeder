@@ -55,7 +55,8 @@ the URLs of the logo and the product photos. Make each URL absolute — some sit
 emit protocol-relative `//cdn.example.com/…`, which needs an `https:` prefix.
 
 With no website given, generate coherent generic data for the stated industry
-instead.
+instead. If website scraping fails or is blocked, do NOT halt or ask questions —
+immediately fall back to rich, synthetic industry data matching the sector.
 
 *Done when* you can name the trade the business is in, the products you will
 import, and the country you will set on the company.
@@ -68,44 +69,39 @@ module defining them is in, so these run in order.
 
 - `odoo-crud auth-check` — first command of the run. If it fails, stop and say
   why; nothing downstream can work.
-- `odoo-crud install-industry bakery` — the **industry** module for the trade
-  the target is in, which configures the database for that business and brings
-  its sample records. Match step 1's research against
-  [`INDUSTRY-MODULES.md`](INDUSTRY-MODULES.md) and install the one that fits.
-  It takes exactly one, and it is a separate command because these modules are
+- `odoo-crud install-industry bakery` — the **industry** module for the trade the
+  target is in, which configures the database for that business and brings its
+  sample records. Match step 1's research against
+  [`INDUSTRY-MODULES.md`](INDUSTRY-MODULES.md) and install the one that fits. It
+  takes exactly one, and it is its own command because these modules are
   downloaded from apps.odoo.com rather than found on the addons path —
-  `install-modules` cannot see them at all.
-  An industry that needs modules this database does not have fails here and
-  names them; that is a Community database being asked for Enterprise ones. Say
-  so in one line and carry on with the base modules — the run still works.
-- `odoo-crud install-modules crm stock sale_management account` — every module
-  behind step 5's import order, in ONE call. Read the list straight off that
-  order: `res.partner` → `contacts`, `product.template` → `product` and
-  `sale_management`, stock on hand → `stock`, `crm.lead` → `crm`, plus
-  `account` for invoicing. It installs *and* confirms before returning, and its
-  JSON lists `not_installed` for anything that failed.
+  `install-modules` cannot see them at all. An industry needing modules this
+  database does not have fails here and names them, which is a Community
+  database being asked for Enterprise ones: say so in one line and carry on with
+  the base modules, because the run still works without it.
+- `odoo-crud install-modules crm stock sale_management account purchase mrp` —
+  every module behind step 5's import order, in ONE call. Read the list straight
+  off that order: `res.partner` → `contacts`, `product.template` → `product` and
+  `sale_management`, stock on hand → `stock`, `crm.lead` → `crm`, `account` for
+  invoicing, `purchase` for the PO chain, and `mrp` when the target manufactures
+  (harmless on a pure trader). It installs *and* confirms before returning, and
+  its JSON lists `not_installed` for anything that failed.
 - `odoo-crud models --filter crm` — which models the install actually gave you.
 - `odoo-crud fields product.template --filter 'name,list_price,barcode'` — one
   compact line per field (`many2one required -> res.partner`), including a
   selection field's allowed values. Filter by the columns you plan to write;
   dumping every field of `res.partner` or `product.template` buries the answer.
 
-*Done when* the industry module is installed or you have said in one line why
-it could not be, `install-modules` has come back with `not_installed` empty,
-and every column of every CSV you are about to write has appeared in a `fields`
+*Done when* the industry module is installed or you have said in one line why it
+could not be, `install-modules` has come back with `not_installed` empty, and
+every column of every CSV you are about to write has appeared in a `fields`
 output, with its type and — for selection fields — its allowed values copied
 verbatim.
 
-### 3. Configure the company
+### 3. Configure the company & activate MTO route
 
-Set country, company name and currency on `res.company` to the real location:
-find the id with `search-read`, then
-
-```
-odoo-crud write res.company --ids '[1]' --values '{"country_id": 241, "currency_id": 23}'
-```
-
-A currency that seems absent is archived, not missing — see the traps file.
+- Set country, company name, and currency on `res.company` to the real location (find the id with `search-read`, then `odoo-crud write res.company --ids '[1]' --values '{"name": "...", "country_id": 241, "currency_id": 23}'` — an absent currency is archived, see `ODOO-TRAPS.md`).
+- In the same pass, unarchive the default MTO ("Replenish on Order") route so on-demand purchasing and manufacturing flows work out of the box: query its id with `odoo-crud search-read stock.route --domain '[["name","ilike","Replenish on Order"],["active","in",[True,False]]]' --fields '["id"]'`, then run `odoo-crud write stock.route --ids '[<mto_route_id>]' --values '{"active": true}'`.
 
 ### 4. Size the dataset
 
@@ -155,15 +151,66 @@ Import in **dependency order** so every reference resolves:
    `Qualified` or `Proposition`). Write every `description` in the **customer's
    voice** — the two or three lines that prospect sent in, naming the real
    product they are asking about and what they need it for.
+5. **Linked Workflows (SO -> MO -> PO)** — wire and trigger the full supply chain so the demo is fully interactive with zero duplicate records.
+   - **Vendor on the product first (`product.supplierinfo`).** Every purchased product/raw material needs a supplier link — without it, Odoo cannot auto-generate RFQs. Create `product.supplierinfo` records with `partner_id/id` (vendor), `product_tmpl_id/id`, `price` (`standard_price`), and delivery delay.
+   - **`mrp.bom` (When manufacturing):**
+      - Raw components: Set `route_ids/id` to include `stock.route_warehouse0_buy` and ensure `product.supplierinfo` is set.
+      - Finished goods: Set `route_ids/id` to include `mrp.route_warehouse0_manufacture` and the unarchived `stock.route_warehouse0_mto`.
+      - Import `mrp.bom` and `mrp.bom.line` linking components to the finished product.
+   - **`sale.order` + `sale.order.line`:** Import draft SOs linked to partner (`partner_id/id`) and CRM opportunity (`opportunity_id/id`), referencing the finished product variant in lines (`product_id/id`).
+   - **Trigger the Native Chain (No manual PO import needed):**
+      Confirm the SO to let Odoo dynamically generate the linked PO and MO:
+      ```bash
+      odoo-crud call sale.order action_confirm --args '[[<so_id>]]'
+      ```
+   - **Verify the Chain:**
+      Run `search-read purchase.order --domain '[["origin","ilike","SO"]]'` and `search-read mrp.production --domain '[["origin","ilike","SO"]]'`.
+      - A confirmed SO must show linked MOs/POs sharing the SO name in their `origin` field.
+      - *Troubleshooting:* A missing PO means the product lacks a supplier in `product.supplierinfo` or the `Buy` route is missing; a missing MO means `mrp` is not installed, the BoM is missing, or the `Manufacture` + `MTO` routes were not active.
 
-Three rules bind every CSV:
+   *Done when* confirmed SOs have generated linked `purchase.order` and `mrp.production` records with matching `origin` fields, and the Odoo smart buttons on the Sales Order link directly to the resulting delivery, MO, and PO.
 
-- **External IDs** — every row carries an `id` column and every reference is
-  `field_id/id` pointing at one. This is what makes a re-import update the
-  record instead of duplicating it, and it is non-negotiable.
-- **Quoting** — comma separator, and every text value wrapped in double quotes
-  so `"Company, Inc."` stays one column.
-- **Language** — the site's language, or the one the sales person asked for.
+6. **Invoices and vendor bills** — the accounting half of the chain, and what
+   fills the P&L, balance sheet and cashflow. Nothing here is imported: each
+   document is created *by* the order it belongs to, which is what wires the
+   smart buttons.
+   - **Customer invoices from the SOs.** `_create_invoices` is private and so
+     unreachable over RPC; the way in is the wizard the SO form's Create Invoice
+     button opens. Create it against the orders, then run it:
+      ```bash
+      odoo-crud create sale.advance.payment.inv --values '{"advance_payment_method": "delivered", "sale_order_ids": [[6, 0, [<so_ids>]]]}'
+      odoo-crud call sale.advance.payment.inv create_invoices --args '[[<wizard_id>]]'
+      ```
+     `delivered` is the wizard's name for a regular invoice, not a down payment.
+     It invoices what each line's policy says is invoiceable, so a product set
+     to *Delivered quantities* invoices nothing until its delivery is validated
+     — `fields product.template --filter invoice_policy` tells you which you
+     have, and on `delivered` either validate the delivery first or write
+     `invoice_policy` to `order` on those products before invoicing.
+   - **Vendor bills from the POs.** A PO generated by the chain above is still a
+     draft RFQ, and only a confirmed one can be billed:
+      ```bash
+      odoo-crud call purchase.order button_confirm --args '[[<po_ids>]]'
+      odoo-crud call purchase.order action_create_invoice --args '[[<po_ids>]]'
+      ```
+   - **Post them.** Both calls leave drafts, and a draft moves no money: the
+     reports stay empty until the entries are posted.
+      ```bash
+      odoo-crud search-read account.move --domain '[["state","=","draft"],["move_type","in",["out_invoice","in_invoice"]]]' --fields '["name","move_type","amount_total"]'
+      odoo-crud call account.move action_post --args '[[<move_ids>]]'
+      ```
+     A bill needs a vendor reference before it will post; set `ref` on the draft
+     if Odoo refuses it.
+
+   *Done when* every SO has an invoice and every confirmed PO a bill, and a
+   `search-read account.move` shows them `state: posted` — a draft invoice looks
+   identical on the order and contributes nothing to a single report.
+
+Four rules bind every CSV:
+- **External IDs:** Use `id` for record creation and `field_id/id` for relational lookups.
+- **Quoting:** Wrap every text value in double quotes `"`.
+- **Language:** Generate all text fields in the specified demo language.
+- **Historical Date Spreading:** *(If Reporting focus is selected)* Spread `date_order` and `create_date` across a rolling 90-day window so Odoo Dashboards display realistic trend graphs.
 
 Asked for more than the default set (`mrp.bom`, employees, chart of accounts…)?
 Build those the same way: sized to the anchor, wired with external IDs, imported
@@ -172,6 +219,8 @@ after whatever they reference.
 *Done when* every import has returned `ok: true` and its record count matches
 the number step 4 called for. On a failure, `ODOO-TRAPS.md` names the cause; fix
 the CSV and re-import — external ids make the retry safe.
+
+
 
 ### 6. Set images
 
@@ -207,4 +256,25 @@ Read back what you wrote — a green import is not proof:
   plus yours — count the ones you imported.
 
 *Done when* every model you touched has been read back and matches. Then print
-the `SUMMARY:` line.
+the `SUMMARY:` line:
+
+```text
+===================================================================
+🚀 DEMO DATABASE READY FOR [COMPANY NAME]
+===================================================================
+• Industry Module: [Installed Industry App]
+• Company Profile: Updated (Currency & Country configured)
+
+📊 DATASET SUMMARY:
+• Partners: X Customers, Y Vendors imported
+• Catalog: Z Products populated (with real web images)
+• Inventory: Stock initialized across storable items
+• Pipeline: N Leads created (~$XXX,XXX expected revenue)
+
+🎯 DEMO CHEAT SHEET FOR SALES PITCH:
+1. Primary Customer to Demo: [Partner Name]
+2. Flagship Product: [Product Name] ($XX.XX)
+3. Top Pipeline Opportunity: [Lead Name] ($XX,XXX - Stage: Qualified)
+===================================================================
+SUMMARY: Imported X partners, Y products, Z leads into Odoo database successfully.
+```
