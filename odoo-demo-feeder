@@ -349,6 +349,20 @@ provider_log_error_pattern() {
 # picks "always allow ... (Persist to settings.json)" — grants that bypass
 # upfront instead of prompting for it.
 provider_permission_allow_rules() { printf '%s\n' "command(odoo-crud)" "unsandboxed(odoo-crud)" "read_url(*)" "read_file(*)" "write_file(*)"; }
+# Without this, a shell command that isn't odoo-crud falls through to agy's
+# default "ask" behaviour instead of being denied outright — a real prompt in
+# --interactive/--plan mode (a model reaching for e.g. 'python3 -c' with
+# BeautifulSoup instead of the skill's own web tools), silently dropped only
+# in headless print mode where nothing can answer it. Deny beats allow on a
+# conflict, so this must name exactly what 'command(odoo-crud)' does NOT
+# already cover, or it would deny odoo-crud itself. agy's command() rules are
+# evaluated per whitespace-separated token as an anchored regex
+# (`^(?:pattern)$`) via github.com/dlclark/regexp2 (confirmed by inspecting
+# the installed agy binary — it links regexp2, which supports the lookahead
+# this needs), so a single-token pattern constrains only the first word
+# (the binary name) and leaves the rest of the command line free: this one
+# denies every first word except a literal 'odoo-crud'.
+provider_permission_deny_rules() { printf '%s\n' 'command((?!odoo-crud$).*)'; }
 
 AGY_MODEL="${AGY_MODEL:-$(provider_default_model)}"   # kept for backwards compatibility
 AI_MODEL="${AI_MODEL:-$AGY_MODEL}"
@@ -679,17 +693,23 @@ chmod +x "$CRUD_WRAPPER"
 
 case "$AI_CLI" in
 agy)
-    # Merge our allow-rules into agy's global settings (preserving anything
-    # already there). Strict, non-regex matching (agy default) —
-    # 'command(odoo-crud)' matches any 'odoo-crud <subcommand>' invocation.
+    # Merge our allow- and deny-rules into agy's global settings (preserving
+    # anything already there). 'command(odoo-crud)' matches any
+    # 'odoo-crud <subcommand>' invocation; the deny rule is what stops every
+    # other shell command from falling through to a prompt (see
+    # provider_permission_deny_rules).
     AI_SETTINGS="$(provider_settings_path)"
     mkdir -p "$(dirname "$AI_SETTINGS")"
     ALLOW_RULES=()
     while IFS= read -r rule; do ALLOW_RULES+=("$rule"); done < <(provider_permission_allow_rules)
-    if python3 - "$AI_SETTINGS" "${ALLOW_RULES[@]}" <<'PY'
+    DENY_RULES=()
+    while IFS= read -r rule; do DENY_RULES+=("$rule"); done < <(provider_permission_deny_rules)
+    if python3 - "$AI_SETTINGS" "${#ALLOW_RULES[@]}" "${ALLOW_RULES[@]}" "${DENY_RULES[@]}" <<'PY'
 import json, sys
 path = sys.argv[1]
-rules = sys.argv[2:]
+n_allow = int(sys.argv[2])
+rest = sys.argv[3:]
+allow_rules, deny_rules = rest[:n_allow], rest[n_allow:]
 try:
     with open(path) as f:
         data = json.load(f)
@@ -697,10 +717,15 @@ try:
         data = {}
 except Exception:
     data = {}
-allow = data.setdefault("permissions", {}).setdefault("allow", [])
-for rule in rules:
+permissions = data.setdefault("permissions", {})
+allow = permissions.setdefault("allow", [])
+for rule in allow_rules:
     if rule not in allow:
         allow.append(rule)
+deny = permissions.setdefault("deny", [])
+for rule in deny_rules:
+    if rule not in deny:
+        deny.append(rule)
 with open(path, "w") as f:
     json.dump(data, f, indent=2)
 PY
