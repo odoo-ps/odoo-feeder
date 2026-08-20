@@ -354,15 +354,32 @@ provider_permission_allow_rules() { printf '%s\n' "command(odoo-crud)" "unsandbo
 # --interactive/--plan mode (a model reaching for e.g. 'python3 -c' with
 # BeautifulSoup instead of the skill's own web tools), silently dropped only
 # in headless print mode where nothing can answer it. Deny beats allow on a
-# conflict, so this must name exactly what 'command(odoo-crud)' does NOT
-# already cover, or it would deny odoo-crud itself. agy's command() rules are
-# evaluated per whitespace-separated token as an anchored regex
-# (`^(?:pattern)$`) via github.com/dlclark/regexp2 (confirmed by inspecting
-# the installed agy binary — it links regexp2, which supports the lookahead
-# this needs), so a single-token pattern constrains only the first word
-# (the binary name) and leaves the rest of the command line free: this one
-# denies every first word except a literal 'odoo-crud'.
-provider_permission_deny_rules() { printf '%s\n' 'command((?!odoo-crud$).*)'; }
+# conflict, so entries here must never name 'odoo-crud' itself.
+#
+# This is a denylist of specific interpreter/shell/network binary names, NOT
+# a real "deny everything except odoo-crud" rule — despite what agy's own
+# docs claim ("command(regex)", and the installed binary does link
+# github.com/dlclark/regexp2), empirically 'command(...)' only matches the
+# first word of the command line by EXACT literal string: 'command(python3)'
+# denies 'python3 -c ...', but 'command(pyth.*)' or a lookahead pattern like
+# '(?!odoo-crud$).*' match nothing at all and silently fall through to the
+# same "ask" prompt this exists to avoid (verified empirically against a
+# live agy session — do not replace this with a regex without re-verifying
+# against a real run, the docs are not a reliable guide here). So this list
+# is inherently incomplete: an agent reaching for a binary not named here
+# still hits the interactive prompt. bwrap remains the real backstop against
+# actual damage from any of these if one is ever allowed through.
+provider_permission_deny_rules() {
+    printf '%s\n' \
+        "command(python3)" "command(python)" "command(python2)" \
+        "command(node)" "command(nodejs)" "command(deno)" "command(bun)" \
+        "command(perl)" "command(ruby)" "command(php)" "command(lua)" \
+        "command(bash)" "command(sh)" "command(zsh)" "command(dash)" "command(ksh)" "command(fish)" \
+        "command(powershell)" "command(pwsh)" \
+        "command(curl)" "command(wget)" "command(nc)" "command(ncat)" "command(socat)" "command(telnet)" "command(ssh)" \
+        "command(npm)" "command(npx)" "command(yarn)" "command(pnpm)" \
+        "command(pip)" "command(pip3)" "command(gem)" "command(osascript)"
+}
 
 AGY_MODEL="${AGY_MODEL:-$(provider_default_model)}"   # kept for backwards compatibility
 AI_MODEL="${AI_MODEL:-$AGY_MODEL}"
