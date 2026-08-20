@@ -75,10 +75,14 @@ module defining them is in, so these run in order.
   [`INDUSTRY-MODULES.md`](INDUSTRY-MODULES.md) and install the one that fits. It
   takes exactly one, and it is its own command because these modules are
   downloaded from apps.odoo.com rather than found on the addons path —
-  `install-modules` cannot see them at all. An industry needing modules this
-  database does not have fails here and names them, which is a Community
-  database being asked for Enterprise ones: say so in one line and carry on with
-  the base modules, because the run still works without it.
+  `install-modules` cannot see them at all. It fails when the download is
+  refused, or when the industry needs modules this database does not have — a
+  Community database being asked for Enterprise ones, which it names.
+  Either way, carry on with the base modules: the run works without it. Say
+  what was lost rather than passing it off as cosmetic — no industry-specific
+  chart of accounts, no configured screens, none of its sample records — and
+  leave the SUMMARY's industry line reading `none (<name> unavailable)` rather
+  than naming a module that never installed.
 - `odoo-crud install-modules crm stock sale_management account purchase mrp` —
   every module behind step 5's import order, in ONE call. Read the list straight
   off that order: `res.partner` → `contacts`, `product.template` → `product` and
@@ -173,17 +177,29 @@ product. Check two entries in the map against their `name` before you use it.
       - Finished goods: Set `route_ids/id` to include `mrp.route_warehouse0_manufacture` and the unarchived `stock.route_warehouse0_mto`.
       - Import `mrp.bom` and `mrp.bom.line` linking components to the finished product.
    - **`sale.order` + `sale.order.line`:** Import draft SOs linked to partner (`partner_id/id`) and CRM opportunity (`opportunity_id/id`), referencing the finished product variant in lines (`product_id/id`).
-   - **Trigger the Native Chain (No manual PO import needed):**
-      Confirm the SO to let Odoo dynamically generate the linked PO and MO:
+   - **Confirm the orders, then read what appeared.**
       ```bash
-      odoo-crud call sale.order action_confirm --args '[[<so_id>]]'
+      odoo-crud confirm-so --ids '[<so_ids>]'
       ```
-   - **Verify the Chain:**
-      Run `search-read purchase.order --domain '[["origin","ilike","SO"]]'` and `search-read mrp.production --domain '[["origin","ilike","SO"]]'`.
-      - A confirmed SO must show linked MOs/POs sharing the SO name in their `origin` field.
-      - *Troubleshooting:* A missing PO means the product lacks a supplier in `product.supplierinfo` or the `Buy` route is missing; a missing MO means `mrp` is not installed, the BoM is missing, or the `Manufacture` + `MTO` routes were not active.
+      It confirms and reports the manufacturing orders and purchase orders that
+      resulted, which is not the same as the ones you expected:
+      - The **MO does** appear, linked, with the SO in its `origin`. That is the
+        smart button the demo is shown through.
+      - The **component PO usually does not.** Stock on hand is why: the MO
+        consumes what step 5.3 imported, so procurement has nothing left to buy.
+        Every run that imports stock lands here, routes correctly set or not.
+      - To get one anyway, `confirm-so --ensure-po` puts a reorder point on each
+        component and runs the scheduler. The PO that follows is raised by the
+        orderpoint, **not** by the order, so its `origin` is empty and no smart
+        button ties it back to the SO. Say that in one line rather than claiming
+        a link the database does not have.
+      - *A missing MO* is the real fault to chase: `mrp` not installed, no BoM,
+        or the `Manufacture` and `MTO` routes not active.
 
-   *Done when* confirmed SOs have generated linked `purchase.order` and `mrp.production` records with matching `origin` fields, and the Odoo smart buttons on the Sales Order link directly to the resulting delivery, MO, and PO.
+   *Done when* each confirmed SO reports `state: sale` with a manufacturing
+   order carrying its name in `origin`, and you have said in one line what the
+   purchase side did — a PO from a reorder point, or none because the components
+   were in stock.
 
 6. **Invoices and vendor bills** — the accounting half of the chain, and what
    fills the P&L, balance sheet and cashflow. Nothing here is imported: each

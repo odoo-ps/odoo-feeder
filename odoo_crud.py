@@ -787,6 +787,109 @@ def cmd_spread_dates(args):
     })
 
 
+def cmd_confirm_so(args):
+    """Confirm sale orders and report what the chain actually produced.
+
+    Confirming an SO for a manufactured product does raise a manufacturing
+    order. It does not reliably raise a purchase order for the components: with
+    stock on hand the MO consumes what is there, and procurement has nothing to
+    buy. A run that imported stock — which this one always does — therefore sees
+    the MO appear and no PO, whatever the routes say.
+
+    So this reports rather than promises. --ensure-po does the one thing that
+    does produce a component PO on a stocked database: a reorder point on each
+    component, then the scheduler. The resulting PO is raised by the orderpoint,
+    not by the order, so its 'origin' does not carry the SO name — the link the
+    smart buttons show for the MO does not exist for that PO.
+    """
+    ids = parse_json(args.ids, "--ids")
+    if not isinstance(ids, list) or not ids:
+        fail("--ids must be a non-empty JSON array of sale.order ids.")
+
+    orders = execute(
+        "sale.order", "search_read", [[["id", "in", ids]]],
+        {"fields": ["name", "state"]},
+    )
+    if not orders:
+        fail(f"No sale.order found for ids {ids}.")
+    names = [o["name"] for o in orders]
+
+    to_confirm = [o["id"] for o in orders if o["state"] in ("draft", "sent")]
+    if to_confirm:
+        execute("sale.order", "action_confirm", [to_confirm])
+
+    def _by_origin(model):
+        return execute(
+            model, "search_read", [[["origin", "in", names]]],
+            {"fields": ["name", "origin", "state"]},
+        ) or []
+
+    mos = _by_origin("mrp.production")
+    pos = _by_origin("purchase.order")
+
+    orderpoints, scheduler_ran = [], False
+    if args.ensure_po and not pos:
+        # Components of the MOs just raised: what a PO would be for.
+        comp_ids = []
+        if mos:
+            moves = execute(
+                "stock.move", "search_read",
+                [[["raw_material_production_id", "in", [m["id"] for m in mos]]]],
+                {"fields": ["product_id"]},
+            ) or []
+            comp_ids = sorted({m["product_id"][0] for m in moves if m.get("product_id")})
+        if comp_ids:
+            wh = execute(
+                "stock.warehouse", "search_read", [[]],
+                {"fields": ["lot_stock_id"], "limit": 1},
+            )
+            if not wh:
+                fail("No stock.warehouse found, so no location for a reorder point.")
+            loc = wh[0]["lot_stock_id"][0]
+            existing = execute(
+                "stock.warehouse.orderpoint", "search_read",
+                [[["product_id", "in", comp_ids]]], {"fields": ["product_id"]},
+            ) or []
+            have = {e["product_id"][0] for e in existing if e.get("product_id")}
+            want = [c for c in comp_ids if c not in have]
+            if want:
+                orderpoints = execute(
+                    "stock.warehouse.orderpoint", "create",
+                    [[{"product_id": c, "location_id": loc,
+                       "product_min_qty": args.min_qty,
+                       "product_max_qty": args.max_qty} for c in want]],
+                )
+                if isinstance(orderpoints, int):
+                    orderpoints = [orderpoints]
+            execute("stock.rule", "run_scheduler", [])
+            scheduler_ran = True
+            pos = execute(
+                "purchase.order", "search_read",
+                [[["state", "in", ["draft", "sent", "purchase"]]]],
+                {"fields": ["name", "origin", "state"]},
+            ) or []
+
+    final = execute(
+        "sale.order", "search_read", [[["id", "in", ids]]],
+        {"fields": ["name", "state"]},
+    )
+    result = {
+        "orders": final,
+        "confirmed": to_confirm,
+        "manufacturing_orders": mos,
+        "purchase_orders": pos,
+        "orderpoints_created": orderpoints,
+        "scheduler_ran": scheduler_ran,
+        "note": ("Purchase orders raised by a reorder point carry no SO in "
+                 "'origin'; only the MO links back to the order."),
+    }
+    unconfirmed = [o for o in final if o["state"] not in ("sale", "done")]
+    if unconfirmed:
+        result["error"] = "Some orders did not reach the 'sale' state."
+        fail_result(result)
+    ok(result)
+
+
 def _ensure_base_import_module():
     """Make sure the module providing the industry download path is installed.
 
@@ -1275,6 +1378,30 @@ def build_parser():
                         "dashboards group by. It is writable: the ORM only "
                         "defaults it when absent.")
 
+    p = sub.add_parser(
+        "confirm-so",
+        help="Confirm sale orders and report the MOs and POs that resulted.",
+        description=(
+            "Confirming an SO raises the manufacturing order. It does NOT "
+            "reliably raise a purchase order for the components: with stock on "
+            "hand the MO consumes what is there and procurement has nothing to "
+            "buy, which is every run that imported stock. So this reports what "
+            "appeared instead of assuming. --ensure-po adds a reorder point per "
+            "component and runs the scheduler, the one route to a component PO "
+            "on a stocked database — that PO is raised by the orderpoint, so its "
+            "'origin' does not carry the SO name."
+        ),
+    )
+    p.add_argument("--ids", required=True,
+                   help="JSON array of sale.order ids, e.g. '[7,8]'.")
+    p.add_argument("--ensure-po", action="store_true",
+                   help="If no component PO appeared, add reorder points for the "
+                        "MO components and run the scheduler.")
+    p.add_argument("--min-qty", type=float, default=5.0,
+                   help="Reorder point minimum for --ensure-po (default 5).")
+    p.add_argument("--max-qty", type=float, default=50.0,
+                   help="Reorder point maximum for --ensure-po (default 50).")
+
     p = sub.add_parser("set-image", help="Set a record image from a URL or file.")
     p.add_argument("model")
     p.add_argument("--id", type=int, required=True, help="Record id.")
@@ -1312,6 +1439,7 @@ HANDLERS = {
     "resolve": cmd_resolve,
     "bill-po": cmd_bill_po,
     "spread-dates": cmd_spread_dates,
+    "confirm-so": cmd_confirm_so,
     "set-image": cmd_set_image,
     "import-preview": cmd_import_preview,
     "import-csv": cmd_import_csv,
