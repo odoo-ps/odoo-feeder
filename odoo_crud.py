@@ -335,12 +335,124 @@ def cmd_create(args):
     ok(execute(args.model, "create", [values]))
 
 
+def _m2m_target_ids(value):
+    """Database ids a many2many write payload is trying to set.
+
+    Accepts the shapes a caller actually sends: [[6, 0, [ids]]], [[4, id], ...]
+    and a plain [ids]. Anything else returns nothing rather than guessing.
+    """
+    if not isinstance(value, list):
+        return []
+    if value and all(isinstance(v, int) for v in value):
+        return list(value)
+    out = []
+    for command in value:
+        if not isinstance(command, list) or not command:
+            continue
+        if command[0] == 6 and len(command) > 2 and isinstance(command[2], list):
+            out.extend(v for v in command[2] if isinstance(v, int))
+        elif command[0] == 4 and len(command) > 1 and isinstance(command[1], int):
+            out.append(command[1])
+    return out
+
+
+def _ensure_routes_selectable(route_ids):
+    """Make routes assignable to products before something tries to assign them.
+
+    product.template.route_ids carries domain=[('product_selectable','=',True)],
+    so a route with that flag off cannot be attached — and the write reporting
+    it is not refused. It returns ok, and the stored value simply never changes.
+    Manufacture and Buy have been found off on real databases while MTO was on,
+    which is why one route of three would stick and the loss looked random.
+
+    The flag defaults to True, so this only ever repairs a database that turned
+    it off. Returns the routes it switched on.
+    """
+    route_ids = sorted({r for r in route_ids if isinstance(r, int)})
+    if not route_ids:
+        return []
+    blocked = execute(
+        "stock.route", "search_read",
+        [[["id", "in", route_ids], ["product_selectable", "=", False]]],
+        {"fields": ["name"]},
+    ) or []
+    if not blocked:
+        return []
+    ids = [r["id"] for r in blocked]
+    execute("stock.route", "write", [ids, {"product_selectable": True}])
+    return [{"id": r["id"], "name": r.get("name")} for r in blocked]
+
+
+def _comparable(asked, stored):
+    """Is the stored value what was asked for? None when it cannot be judged.
+
+    Odoo legitimately reshapes what it gives back — a many2one reads as
+    [id, label], a float written as 5 reads as 5.0, a date written bare reads
+    with a time. Only a difference this can be sure about is worth reporting,
+    so anything ambiguous returns None and stays quiet.
+    """
+    if isinstance(asked, bool) or isinstance(stored, bool):
+        return bool(asked) == bool(stored)
+    if isinstance(asked, (int, float)) and isinstance(stored, (int, float)):
+        return float(asked) == float(stored)
+    # many2one: asked an id, read back [id, label].
+    if isinstance(asked, int) and isinstance(stored, list):
+        return bool(stored) and stored[0] == asked
+    # x2many: compare as sets, since order carries no meaning.
+    if isinstance(asked, list) and isinstance(stored, list):
+        targets = _m2m_target_ids(asked)
+        if not targets:
+            return None
+        return set(targets) == set(v for v in stored if isinstance(v, int))
+    if isinstance(asked, str) and isinstance(stored, str):
+        return stored == asked or stored.startswith(asked) or asked.startswith(stored)
+    if isinstance(asked, str) and stored is False:
+        return False
+    return None
+
+
 def cmd_write(args):
     ids = parse_json(args.ids, "--ids")
     values = parse_json(args.values, "--values")
     if ids is None or values is None:
         fail("--ids and --values are required.")
-    ok(execute(args.model, "write", [ids, values]))
+
+    # Attaching routes to products fails silently when the route is not
+    # product-selectable, so clear that first rather than report it after.
+    routes_enabled = []
+    if "route_ids" in values:
+        routes_enabled = _ensure_routes_selectable(_m2m_target_ids(values["route_ids"]))
+
+    result = execute(args.model, "write", [ids, values])
+
+    # Read back what was asked for. A write that changes nothing still returns
+    # true — the ORM reports that it ran, not that it took effect — and that is
+    # how a stripped route, a readonly field and a domain-filtered value all
+    # look from here.
+    payload = {"written": result, "ids": ids}
+    if routes_enabled:
+        payload["routes_made_selectable"] = routes_enabled
+    stored = execute(
+        args.model, "search_read", [[["id", "in", ids]]],
+        {"fields": sorted(values)},
+    ) or []
+    unchanged = []
+    for record in stored:
+        for field, asked in values.items():
+            verdict = _comparable(asked, record.get(field))
+            if verdict is False:
+                unchanged.append({
+                    "id": record["id"], "field": field,
+                    "asked": asked, "stored": record.get(field),
+                })
+    if unchanged:
+        payload["warning"] = (
+            "The write returned true but these fields did not take the value "
+            "asked for. Odoo accepted the call and stored something else — a "
+            "field filtered by its domain, computed over, or readonly."
+        )
+        payload["unchanged"] = unchanged
+    ok(payload)
 
 
 def cmd_unlink(args):
@@ -1187,6 +1299,46 @@ def _missing_required_fields(model, meta, headers):
     ]
 
 
+def _csv_route_ids(fields, rows):
+    """Route database ids a CSV's route_ids column is trying to assign.
+
+    The column is comma-separated, and arrives either as route_ids/id holding
+    external ids ('stock.route_warehouse0_buy') or as bare route_ids holding
+    display names ('Buy') — the two keying styles load() accepts. Resolve both,
+    because the ids are what tells us which routes need unblocking.
+    """
+    xmlids, names = set(), set()
+    for index, header in enumerate(fields):
+        if _field_base(header) != "route_ids":
+            continue
+        by_xmlid = header.endswith("/id")
+        for row in rows:
+            if index >= len(row) or not row[index]:
+                continue
+            for token in str(row[index]).split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                (xmlids if by_xmlid else names).add(token)
+
+    found = []
+    if xmlids:
+        data = execute(
+            "ir.model.data", "search_read",
+            [[["model", "=", "stock.route"],
+              ["name", "in", sorted(x.split(".", 1)[-1] for x in xmlids)]]],
+            {"fields": ["res_id"]},
+        ) or []
+        found.extend(d["res_id"] for d in data)
+    if names:
+        recs = execute(
+            "stock.route", "search_read", [[["name", "in", sorted(names)]]],
+            {"fields": ["id"]},
+        ) or []
+        found.extend(r["id"] for r in recs)
+    return found
+
+
 def cmd_import_csv(args):
     """Import a CSV via the model's low-level load() — handles external IDs and
     the 'field/id' relational syntax, and reports per-row error messages."""
@@ -1220,6 +1372,13 @@ def cmd_import_csv(args):
             "exact names — nothing was imported."
         )
 
+    # Same silent stripping as the write path: a route that is not
+    # product-selectable is dropped from route_ids without an error, so a CSV
+    # assigning Manufacture or Buy imports green and lands only MTO.
+    routes_enabled = _ensure_routes_selectable(
+        _csv_route_ids(fields, body)
+    ) if any(_field_base(f) == "route_ids" for f in fields) else []
+
     result = execute(args.model, "load", [fields, body])
 
     # load() returns {'ids': [...] or False, 'messages': [...]}. A non-empty
@@ -1228,9 +1387,11 @@ def cmd_import_csv(args):
     ids = result.get("ids") if isinstance(result, dict) else result
     if messages:
         fail_result({"status": "failed", "messages": messages,
-                     "imported": 0, "fields_used": fields})
+                     "imported": 0, "fields_used": fields,
+                     "routes_made_selectable": routes_enabled})
     ok({"status": "imported", "imported": len(ids or []),
-        "ids": ids, "fields_used": fields})
+        "ids": ids, "fields_used": fields,
+        "routes_made_selectable": routes_enabled})
 
 
 def _add_context_arg(parser):

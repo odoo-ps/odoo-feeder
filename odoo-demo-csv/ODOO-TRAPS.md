@@ -142,3 +142,37 @@ Read the result: `true` means done, a dict means a wizard you have not answered.
 Confirm with `search-read stock.picking --fields '["name","state"]'` — `done` is
 the only state that moved any stock. Moves with no quantity fail the sanity
 check, so write `quantity` on `stock.move` if `action_assign` reserved nothing.
+
+## A route write returns green and the route is not there
+
+Manufacture and Buy refuse to stick while MTO does, from a `route_ids` write
+that reported `ok: true` — CSV, `write` or `call` alike. Nothing was dropped at
+random: `product.template.route_ids` carries
+`domain=[('product_selectable','=',True)]`, so a route with that flag off cannot
+be attached, and the write is not refused for it. Odoo stores what it is allowed
+to store and returns success. MTO survived because its flag was on.
+
+`odoo-crud write` and `import-csv` now switch the flag on for the routes you are
+assigning before assigning them, and report which ones under
+`routes_made_selectable`, so this should not recur. To check or repair it
+directly:
+
+```
+odoo-crud search-read stock.route --domain '[["name","in",["Manufacture","Buy","Replenish on Order"]]]' --fields '["name","product_selectable"]'
+odoo-crud write stock.route --ids '[<manufacture_id>,<buy_id>]' --values '{"product_selectable": true}'
+```
+
+The flag defaults to `True`, so finding it off means something in the database
+turned it off — worth a narrated line, not a mystery.
+
+## A write reports success and the value did not change
+
+`write` returns `true` when the call ran, not when it took effect. A field
+filtered by its own domain, computed over, or readonly all look identical from
+here: green call, unchanged record.
+
+`odoo-crud write` reads the record back and compares, so this arrives as a
+`warning` with `unchanged` listing the field, what you asked for and what is
+stored. Believe the read, not the `true`. Values Odoo legitimately reshapes — a
+many2one read back as `[id, label]`, a bare date read back with a time — are not
+reported.

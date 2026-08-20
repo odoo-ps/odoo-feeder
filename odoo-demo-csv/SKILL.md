@@ -190,11 +190,14 @@ product. Check two entries in the map against their `name` before you use it.
    - **`mrp.bom` (When manufacturing):**
       - Raw components: Set `route_ids/id` to include `stock.route_warehouse0_buy` and ensure `product.supplierinfo` is set.
       - Finished goods: Set `route_ids/id` to include `mrp.route_warehouse0_manufacture` and the unarchived `stock.route_warehouse0_mto`.
-      - **Read the routes back.** They do not always stick: a write of both has
-        come back holding MTO alone, with no error. `search-read
-        product.template --fields '["route_ids"]'` says what is really there.
-        MTO plus a BoM is enough to raise the MO, so a missing Manufacture route
-        is worth a narrated line rather than a fight.
+      - **Read the routes back.** `search-read product.template --fields
+        '["route_ids"]'` says what is really there. A route only attaches when
+        it is `product_selectable`, and one that is not gets dropped from the
+        write without an error — which is why Manufacture and Buy have gone
+        missing while MTO stayed. `write` and `import-csv` switch that flag on
+        for you and say so under `routes_made_selectable`; the trap entry has
+        the manual repair. MTO plus a BoM raises the MO regardless, so a route
+        still missing is a narrated line rather than a fight.
       - Import `mrp.bom` and `mrp.bom.line` linking components to the finished product.
    - **`sale.order` + `sale.order.line`:** Import draft SOs linked to partner (`partner_id/id`) and CRM opportunity (`opportunity_id/id`), referencing the finished product variant in lines (`product_id/id`).
    - **Confirm the orders, then read what appeared.**
