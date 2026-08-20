@@ -1046,9 +1046,11 @@ def cmd_import_preview(args):
     so the agent can see why an import would fail before running it.
     """
     headers, body = _read_csv(args.file)
+    # 'selection' rides along so a required selection column arrives with its
+    # allowed values, instead of costing a separate fields probe to fill in.
     meta = execute(
         args.model, "fields_get", [],
-        {"attributes": ["string", "relation"] + _REQUIRED_ATTRS},
+        {"attributes": ["string", "relation", "selection"] + _REQUIRED_ATTRS},
     )
     # The same matcher import-csv refuses on, so a preview that reports no
     # unknown column is a promise that the import will not be rejected over one
@@ -1067,7 +1069,7 @@ def cmd_import_preview(args):
         if suggestions.get(header):
             column["suggestion"] = suggestions[header]
         columns.append(column)
-    missing_required = _missing_required_fields(args.model, meta, headers)
+    req = _required_field_report(args.model, meta, headers)
     ok({
         "model": args.model,
         "rows": len(body),
@@ -1076,7 +1078,12 @@ def cmd_import_preview(args):
             {"header": header, "suggestion": suggestion}
             for header, suggestion in unknown
         ],
-        "missing_required_columns": missing_required,
+        # Kept as the names import-csv would refuse on, so the two commands
+        # agree; the classified lists below say what else is missing.
+        "missing_required_columns": [e["field"] for e in req["blocking"]],
+        "required_blocking": req["blocking"],
+        "required_defaulted": req["defaulted"],
+        "required_readonly": req["readonly"],
         "sample_rows": body[:3],
     })
 
@@ -1111,37 +1118,73 @@ def _unknown_columns(meta, headers):
     return unknown
 
 
-def _missing_required_fields(model, meta, headers):
-    """Model fields that genuinely have to come from the CSV but are absent.
+def _required_field_report(model, meta, headers):
+    """Every required field the CSV does not supply, split by what happens next.
 
-    A missing required field (e.g. product_id on stock.quant) doesn't always
-    surface as a clean load() message — it can slip through as NULL and crash
-    at the SQL layer with a raw, uncaught 'not-null constraint' error instead.
-    Catching it here, before load() ever runs, turns that into one clear line.
+    'required' in fields_get describes the field *definition*, not whether a
+    value has to come from the CSV. product.template marks uom_id,
+    invoice_policy, customer_lead and document_tax_mode required and Odoo has a
+    default for each, so refusing over them rejects a perfectly good import —
+    which is why they were filtered out.
 
-    But 'required' in fields_get describes the field *definition*, not whether
-    a value must be supplied, so it cannot be used on its own. product.template
-    marks type, uom_id, service_tracking and base_unit_count required and every
-    one of them has a default; product_variant_ids is required and is a
-    one2many the ORM fills in itself. Reporting those refuses a perfectly good
-    import, so narrow the list to fields that are writable, stored, not a
-    x2many, and have no default — the last of which only Odoo can answer, via
-    default_get.
+    Filtering hid them instead. A default that default_get answers for is not
+    always the value load() ends up applying, and imports kept failing on
+    exactly those fields with nothing in the preview to show it coming. So
+    report all of them and say which is which:
+
+      blocking  — no default: load() will fail, the column must be added.
+      defaulted — Odoo has one, and its value is here to be checked or copied
+                  into the CSV rather than trusted silently.
+      readonly  — required but not writable, so no column can supply it; listed
+                  because it explains a failure no column will fix.
+
+    Selection options and the relation come along, so a column can be filled in
+    rather than guessed at and probed for separately.
     """
     present = {_field_base(header) for header in headers}
-    candidates = [
-        name for name, info in meta.items()
+    required = {
+        name: info for name, info in meta.items()
         if info.get("required")
         and name not in present
-        and not info.get("readonly")
         and info.get("store", True)
         and info.get("type") not in ("one2many", "many2many")
-    ]
-    if not candidates:
-        return []
+    }
+    if not required:
+        return {"blocking": [], "defaulted": [], "readonly": []}
+
+    writable = sorted(n for n, i in required.items() if not i.get("readonly"))
     # default_get returns an entry only for the fields that do have a default.
-    defaults = execute(model, "default_get", [sorted(candidates)]) or {}
-    return sorted(name for name in candidates if name not in defaults)
+    defaults = (execute(model, "default_get", [writable]) or {}) if writable else {}
+
+    def _entry(name, extra=None):
+        info = required[name]
+        out = {"field": name, "label": info.get("string"), "type": info.get("type")}
+        if info.get("relation"):
+            out["relation"] = info["relation"]
+        selection = info.get("selection")
+        if selection:
+            out["allowed"] = [value for value, _label in selection]
+        if extra:
+            out.update(extra)
+        return out
+
+    return {
+        "blocking": [_entry(n) for n in writable if n not in defaults],
+        "defaulted": [_entry(n, {"default": defaults[n]}) for n in writable if n in defaults],
+        "readonly": [_entry(n) for n in sorted(required) if required[n].get("readonly")],
+    }
+
+
+def _missing_required_fields(model, meta, headers):
+    """The required fields whose absence will actually fail the import.
+
+    import-csv refuses on these alone: a field Odoo can default is not a reason
+    to reject a CSV. import-preview reports the rest of the picture.
+    """
+    return [
+        entry["field"]
+        for entry in _required_field_report(model, meta, headers)["blocking"]
+    ]
 
 
 def cmd_import_csv(args):
@@ -1412,6 +1455,18 @@ def build_parser():
     p = sub.add_parser(
         "import-preview",
         help="Preview a CSV import without committing (introspection/debug).",
+        description=(
+            "Matches the CSV against the model and commits nothing. Reports "
+            "unknown columns with a near-miss suggestion, and every REQUIRED "
+            "field the file does not supply, split three ways: "
+            "required_blocking (no default — load() will fail without the "
+            "column), required_defaulted (Odoo has one, and its value is shown "
+            "so it can be checked or copied in rather than trusted), and "
+            "required_readonly (no column can supply it). Selection options and "
+            "relations come with each, so a column can be filled in without a "
+            "separate fields probe. Probing only the columns you meant to write "
+            "cannot surface a requirement you did not know about; this can."
+        ),
     )
     p.add_argument("model")
     p.add_argument("--file", required=True)

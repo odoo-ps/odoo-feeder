@@ -135,7 +135,20 @@ look fake.
 
 ### 5. Generate and import
 
-Write each CSV to a file, then `odoo-crud import-csv <model> --file <path>`.
+Write each CSV to a file, preview it, then import it:
+
+```
+odoo-crud import-preview <model> --file <path>
+odoo-crud import-csv     <model> --file <path>
+```
+
+Preview costs one call, commits nothing, and answers the question step 2
+cannot: step 2 probes the columns you *decided* to write, and the fields that
+fail an import are the ones you did not know to ask about. It names them —
+`required_blocking` must be added, `required_defaulted` shows the value Odoo
+will use — along with any column that maps to no field. Add what it lists,
+preview again, then import.
+
 Import in **dependency order** so every reference resolves:
 
 1. **`res.partner`** — customers + vendors.

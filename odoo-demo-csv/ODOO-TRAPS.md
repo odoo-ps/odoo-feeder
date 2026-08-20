@@ -35,8 +35,21 @@ versions. `odoo-crud fields <model> --filter <field>` prints them
 ## An import complains about a missing required field
 
 The field has no default, so Odoo cannot fill it for you: add the column to the
-CSV. `odoo-crud fields <model>` marks every `required` field, so a probe of the
-columns you intend to write catches this before the import does.
+CSV.
+
+Probing with `fields <model> --filter '<your columns>'` will not find it. That
+filter only covers the columns you already meant to write, and this is a field
+you did not know you needed — `name`, `uom_id`, `document_tax_mode` and
+`invoice_policy` have all failed imports this way. Ask the file instead:
+
+```
+odoo-crud import-preview <model> --file <path>
+```
+
+`required_blocking` is what load() will refuse over. `required_defaulted` is
+what Odoo will fill in, with the value it intends to use — read it rather than
+trust it, since a default that exists is not always the one that lands.
+`required_readonly` explains a failure no column can fix.
 
 ## On-hand quantity reads zero after a green import
 
