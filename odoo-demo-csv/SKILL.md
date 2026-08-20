@@ -27,11 +27,16 @@ sees nothing else of the run.
 
 **No real people** — every customer, vendor and lead you invent is a fictional
 person or company; ground truth only covers the target company itself (its real
-products, prices, photos). Never let an invented contact resemble a real one:
-emails go on a domain that cannot resolve (`example.com`, or `@<company>-demo.test`),
-phone numbers use a range reserved for fiction (e.g. `+1 555 0100`–`0199`, or a
-country's official drama/fake-number block) — never a real subscriber range.
-This applies to every `email`/`phone`/`mobile` column you write, in every model.
+products, prices, photos), never its staff's or its customers' contact details.
+Never let an invented contact resemble a real one, and never let its email or
+phone hint at any real company — including the target company itself: emails go
+on a domain that cannot resolve and carries no company name at all (`example.com`
+/ `example.org` / `example.net` only — not `@<company>-demo.test` or any variant
+that embeds a real name), phone numbers use a range reserved for fiction (e.g.
+`+1 555 0100`–`0199`, or a country's official drama/fake-number block) — never a
+real subscriber range. This applies to every `email`/`phone`/`mobile` column you
+write, in every model, with no exceptions — including rows for the target
+company's own res.company or res.partner record.
 
 ## The tool
 
