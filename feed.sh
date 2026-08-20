@@ -266,6 +266,18 @@ provider_install() {
     esac
 }
 
+# provider_post_install — the extra step a provider needs after its installer.
+# Only agy has one ('agy install' sets up its own components). Running it for
+# every provider printed "Invalid command format — did you mean copilot -i
+# 'install'?" straight after a successful install: harmless, swallowed by the
+# exit code, and exactly the sort of error text that makes a working bootstrap
+# look broken.
+provider_post_install() {
+    case "$AI_CLI" in
+        agy) agy install >/dev/null 2>&1 || true ;;
+    esac
+}
+
 provider_supported
 
 # --------------------------------------------------------------------------- #
@@ -307,7 +319,7 @@ if command -v "$BIN" >/dev/null 2>&1; then
 else
     provider_install
     export PATH="$HOME/.local/bin:$PATH"
-    command -v "$BIN" >/dev/null 2>&1 && { "$BIN" install || true; ok "$BIN installed"; } \
+    command -v "$BIN" >/dev/null 2>&1 && { provider_post_install; ok "$BIN installed"; } \
         || warn "$BIN installed but not on PATH yet — open a new terminal and run '$BIN' once to log in."
 fi
 
