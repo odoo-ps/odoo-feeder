@@ -422,6 +422,17 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
 else
     command -v bwrap >/dev/null 2>&1 || die "bubblewrap (bwrap) is not installed.
    Run the one-line bootstrap first: $BOOTSTRAP"
+    # Installed is not the same as usable. Ubuntu 23.10+ blocks unprivileged
+    # user namespaces through AppArmor, so bwrap is on PATH and still cannot
+    # jail anything — and checking only for the binary meant finding that out
+    # after the research, the installs and the imports, at the moment the agent
+    # was due to start.
+    bwrap --dev-bind / / --unshare-pid true >/dev/null 2>&1 || die "bwrap is installed but cannot create a sandbox.
+   On Ubuntu 23.10+ this is the unprivileged user-namespace restriction
+   (kernel.apparmor_restrict_unprivileged_userns=1). Load Ubuntu's profile:
+     sudo apt install apparmor-profiles
+     sudo ln -s /usr/share/apparmor/extra-profiles/bwrap-userns-restrict /etc/apparmor.d/
+     sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict"
 fi
 command -v python3 >/dev/null 2>&1 || die "python3 is not installed.
    Run the one-line bootstrap first: $BOOTSTRAP"

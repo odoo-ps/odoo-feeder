@@ -142,6 +142,45 @@ ensure_cmd() {  # ensure_cmd <command> <apt-names> ::: <dnf-names> ::: <brew-nam
     ok "$cmd installed"
 }
 
+# Installing bubblewrap is not the same as being able to sandbox with it.
+# Ubuntu 23.10+ restricts unprivileged user namespaces through AppArmor
+# (kernel.apparmor_restrict_unprivileged_userns=1), so bwrap is present, on PATH,
+# and refuses to create a sandbox — and the feeder only checks that the binary
+# exists, so the run gets all the way to launching the agent before it dies.
+#
+# Ubuntu ships the profile that permits it again, in apparmor-profiles, unlinked.
+# Probe before touching any of that: a machine without the restriction needs
+# none of it, and loading AppArmor profiles is not something to do speculatively.
+ensure_bwrap_works() {
+    local probe=(bwrap --dev-bind / / --unshare-pid true)
+    if "${probe[@]}" >/dev/null 2>&1; then
+        ok "bwrap can sandbox"
+        return 0
+    fi
+    local profile="/usr/share/apparmor/extra-profiles/bwrap-userns-restrict"
+    if [[ "$PM" == "apt" ]]; then
+        warn "bwrap cannot create a sandbox — applying Ubuntu's AppArmor profile..."
+        [[ -f "$profile" ]] || $SUDO apt-get install -y apparmor-profiles >/dev/null 2>&1 || true
+        if [[ -f "$profile" ]]; then
+            # -sf and -r so a second run replaces rather than erroring on a
+            # profile that is already there.
+            $SUDO ln -sf "$profile" /etc/apparmor.d/ 2>/dev/null || true
+            $SUDO apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict 2>/dev/null || true
+        fi
+        if "${probe[@]}" >/dev/null 2>&1; then
+            ok "bwrap can sandbox (AppArmor profile loaded)"
+            return 0
+        fi
+    fi
+    warn "bwrap still cannot create a sandbox, so the run will fail at the point
+   it tries to jail the agent. On Ubuntu 23.10+ this is the unprivileged
+   user-namespace restriction; apply it by hand with:
+     sudo apt install apparmor-profiles
+     sudo ln -s /usr/share/apparmor/extra-profiles/bwrap-userns-restrict /etc/apparmor.d/
+     sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict"
+    return 0
+}
+
 # gum powers the nicer prompts, but it is OPTIONAL — the feeder falls back to
 # plain prompts without it, so every failure here is a warning, never fatal.
 # Prefer real packages: dnf ships gum directly; Debian/Ubuntu need Charm's own
@@ -247,6 +286,7 @@ ensure_node
 # install there, so we only require bwrap on Linux.
 if [[ "$(uname -s)" != "Darwin" ]]; then
     ensure_cmd bwrap bubblewrap       ::: bubblewrap
+    ensure_bwrap_works
 fi
 ensure_gum                            # optional: nicer prompts, plain fallback
 
