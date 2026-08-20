@@ -703,6 +703,90 @@ def cmd_bill_po(args):
     ok(result)
 
 
+_SPREAD_FIELDS = {
+    "sale.order": ["date_order"],
+    "purchase.order": ["date_order"],
+    "account.move": ["invoice_date", "date"],
+    "crm.lead": ["create_date"],
+    "stock.picking": ["scheduled_date"],
+}
+
+
+def cmd_spread_dates(args):
+    """Backdate records evenly across a window, for the trend charts.
+
+    Everything a run creates is stamped with the moment it was created, so every
+    dashboard shows one spike on today and a flat line behind it. There is no
+    import-time fix: an order's date is set when it is confirmed, not when its
+    CSV row is read, so the spreading has to happen afterwards and per record.
+
+    Dates land oldest-first over the window ending today, one write each because
+    each value differs. Field types are read rather than assumed: date_order is
+    a datetime and invoice_date is a date, and writing the wrong shape into
+    either is rejected.
+    """
+    model = args.model
+    if args.fields:
+        wanted = parse_json(args.fields, "--fields")
+        if not isinstance(wanted, list) or not wanted:
+            fail("--fields must be a non-empty JSON array of field names.")
+    else:
+        wanted = _SPREAD_FIELDS.get(model)
+        if not wanted:
+            fail(f"No default date field known for '{model}'. Pass --fields, "
+                 f"e.g. --fields '[\"date_order\"]'.")
+    if args.also_create_date and "create_date" not in wanted:
+        wanted = wanted + ["create_date"]
+
+    meta = execute(model, "fields_get", [wanted], {"attributes": ["type"]}) or {}
+    unknown = [f for f in wanted if f not in meta]
+    if unknown:
+        fail(f"{model} has no field(s): {', '.join(unknown)}.")
+    bad = {f: meta[f]["type"] for f in wanted if meta[f]["type"] not in ("date", "datetime")}
+    if bad:
+        fail(f"Not date fields on {model}: {bad}.")
+
+    if args.ids:
+        ids = parse_json(args.ids, "--ids")
+        if not isinstance(ids, list) or not ids:
+            fail("--ids must be a non-empty JSON array.")
+    else:
+        domain = parse_json(args.domain, "--domain") if args.domain else []
+        recs = execute(model, "search_read", [domain], {"fields": ["id"]})
+        ids = [r["id"] for r in recs]
+    if not ids:
+        fail(f"No {model} records to spread.")
+
+    ids = sorted(ids)
+    span = max(len(ids) - 1, 1)
+    today = datetime.date.today()
+    written = []
+    for index, rec_id in enumerate(ids):
+        # Oldest first, so the newest record lands on today and the chart runs
+        # up to the present instead of stopping short of it.
+        offset = round(args.days * (len(ids) - 1 - index) / span)
+        day = today - datetime.timedelta(days=offset)
+        # A spread of business hours, so a day with several records does not
+        # stack them all on midnight.
+        stamp = "%s %02d:%02d:00" % (day.isoformat(), 9 + (index % 9), (index * 7) % 60)
+        vals = {
+            f: (day.isoformat() if meta[f]["type"] == "date" else stamp)
+            for f in wanted
+        }
+        execute(model, "write", [[rec_id], vals])
+        written.append({"id": rec_id, **vals})
+
+    ok({
+        "model": model,
+        "fields": wanted,
+        "days": args.days,
+        "count": len(written),
+        "oldest": written[0] if written else None,
+        "newest": written[-1] if written else None,
+        "records": written,
+    })
+
+
 def _ensure_base_import_module():
     """Make sure the module providing the industry download path is installed.
 
@@ -1166,6 +1250,31 @@ def build_parser():
                         "then covers only received quantities, which in a demo "
                         "is usually none of them.")
 
+    p = sub.add_parser(
+        "spread-dates",
+        help="Backdate records across a window so trend charts show a line.",
+        description=(
+            "Everything a run creates is stamped 'now', so every dashboard shows "
+            "one spike on today. An order's date is set when it is confirmed, "
+            "not when its CSV row is read, so this runs after the records exist. "
+            "Dates land oldest-first across the window ending today. Knows the "
+            "date field for sale.order, purchase.order, account.move, crm.lead "
+            "and stock.picking; pass --fields for anything else."
+        ),
+    )
+    p.add_argument("model")
+    p.add_argument("--ids", help="JSON array of ids. Omitted, --domain decides.")
+    p.add_argument("--domain", help="JSON domain selecting the records to spread. "
+                                   "Defaults to every record of the model.")
+    p.add_argument("--days", type=int, default=90,
+                   help="Window length in days, ending today (default 90).")
+    p.add_argument("--fields", help="JSON array of date/datetime fields to write, "
+                                   "overriding the per-model default.")
+    p.add_argument("--also-create-date", action="store_true",
+                   help="Write create_date too, which is what several Odoo "
+                        "dashboards group by. It is writable: the ORM only "
+                        "defaults it when absent.")
+
     p = sub.add_parser("set-image", help="Set a record image from a URL or file.")
     p.add_argument("model")
     p.add_argument("--id", type=int, required=True, help="Record id.")
@@ -1202,6 +1311,7 @@ HANDLERS = {
     "install-industry": cmd_install_industry,
     "resolve": cmd_resolve,
     "bill-po": cmd_bill_po,
+    "spread-dates": cmd_spread_dates,
     "set-image": cmd_set_image,
     "import-preview": cmd_import_preview,
     "import-csv": cmd_import_csv,

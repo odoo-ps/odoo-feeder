@@ -231,8 +231,26 @@ product. Check two entries in the map against their `name` before you use it.
 Four rules bind every CSV:
 - **External IDs:** Use `id` for record creation and `field_id/id` for relational lookups.
 - **Quoting:** Wrap every text value in double quotes `"`.
-- **Language:** Generate all text fields in the specified demo language.
-- **Historical Date Spreading:** *(If Reporting focus is selected)* Spread `date_order` and `create_date` across a rolling 90-day window so Odoo Dashboards display realistic trend graphs.
+- **Language:** every text field in the demo language asked for.
+- **Relational keying:** `field/id` matches an external id, a bare `field`
+  matches by display name. Both work and they are not interchangeable —
+  `uom_id` written bare resolves `"Units"` by name, while `partner_id/id` wants
+  `partner_client_1`. Pick per column and stay consistent.
+
+7. **Spread the dates** *(when trend reporting was asked for)* — every record so
+   far is stamped with the moment it was created, so each dashboard shows one
+   spike on today and nothing behind it. No CSV column fixes this: an order's
+   date is set when it is confirmed, not when its row is read, so it is a pass
+   over the finished records.
+   ```bash
+   odoo-crud spread-dates sale.order --days 90
+   odoo-crud spread-dates account.move --days 90 --domain '[["state","=","posted"]]'
+   ```
+   Run it **last**, after confirming and posting — both stamp fresh dates and
+   would undo it.
+
+   *Done when* a `search-read` of the spread model shows its dates ranging back
+   across the window rather than clustered on today.
 
 Asked for more than the default set (`mrp.bom`, employees, chart of accounts…)?
 Build those the same way: sized to the anchor, wired with external IDs, imported
