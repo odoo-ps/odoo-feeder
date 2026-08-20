@@ -280,6 +280,57 @@ def cmd_auth_check(_args):
     ok({"uid": uid, "url": url, "database": db, "login": login, "version": version})
 
 
+_BLACKHOLE_MAIL_SERVER_NAME = "Demo Feeder Black Hole (do not remove)"
+
+
+def cmd_disable_outgoing_mail(_args):
+    """Make outgoing mail fail closed, so a demo run never emails anyone for real.
+
+    Called directly by the launcher script before the agent ever starts — never
+    by the agent itself, so it cannot be skipped by a model that forgets or a
+    template that doesn't ask for it. Two steps:
+
+    1. Deactivate every ir.mail_server already configured on the target
+       database — it may be wired to a real SMTP relay from before this tool
+       ever touched it.
+    2. Point the database at one dummy, unreachable server instead of leaving
+       none configured at all: with zero active ir.mail_server records, Odoo's
+       mail path falls back to a direct connection attempt to localhost:25,
+       which actually sends if the host happens to run a local MTA. An
+       explicit bogus host removes that fallback path entirely — every send
+       attempt fails the SMTP connection and the mail stays queued as an
+       exception, never leaving the machine.
+    """
+    existing = execute(
+        "ir.mail_server", "search_read", [[]],
+        {"fields": ["id", "active"], "context": {"active_test": False}},
+    )
+    active_ids = [r["id"] for r in existing if r.get("active")]
+    if active_ids:
+        execute("ir.mail_server", "write", [active_ids, {"active": False}])
+
+    blackhole = execute(
+        "ir.mail_server", "search_read",
+        [[["name", "=", _BLACKHOLE_MAIL_SERVER_NAME]]],
+        {"fields": ["id"], "context": {"active_test": False}},
+    )
+    values = {
+        "name": _BLACKHOLE_MAIL_SERVER_NAME,
+        "smtp_host": "blackhole.odoo-demo-feeder.invalid",
+        "smtp_port": 1025,
+        "smtp_encryption": "none",
+        "sequence": 0,
+        "active": True,
+    }
+    if blackhole:
+        server_id = blackhole[0]["id"]
+        execute("ir.mail_server", "write", [[server_id], values])
+    else:
+        server_id = execute("ir.mail_server", "create", [[values]])[0]
+
+    ok({"deactivated_existing": active_ids, "blackhole_server_id": server_id})
+
+
 def _unknown_fields(meta, names):
     """Names (first dotted path segment, so 'partner_id.name' checks
     'partner_id') absent from the model's own fields.
@@ -731,6 +782,13 @@ def build_parser():
 
     sub.add_parser("auth-check", help="Verify the connection and credentials.")
 
+    sub.add_parser(
+        "disable-outgoing-mail",
+        help="Deactivate any configured mail server and point the database at "
+             "an unreachable dummy one, so a demo run can never send real "
+             "email. Run once by the launcher itself, before the agent starts.",
+    )
+
     p = sub.add_parser("search-read", help="Search and read records.")
     p.add_argument("model")
     p.add_argument("--domain", help="JSON list, e.g. '[[\"name\",\"=\",\"X\"]]'")
@@ -828,6 +886,7 @@ def build_parser():
 
 HANDLERS = {
     "auth-check": cmd_auth_check,
+    "disable-outgoing-mail": cmd_disable_outgoing_mail,
     "search-read": cmd_search_read,
     "create": cmd_create,
     "write": cmd_write,

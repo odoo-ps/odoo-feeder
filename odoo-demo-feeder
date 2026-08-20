@@ -503,6 +503,21 @@ while :; do
             ODOO_DB="$DETECTED_DB"
         fi
         info "  ✔ Connection successful (Odoo version $(printf '%s' "$AUTH_OUT" | python3 -c "import sys, json; print(json.load(sys.stdin).get('result', {}).get('version', {}).get('server_version', 'unknown'))" 2>/dev/null || true), Database: $ODOO_DB)"
+
+        # Done here, in the launcher itself — never delegated to the agent's
+        # prompt — so a run can never skip it by having a weaker model forget,
+        # or a template that never mentions it. See odoo_crud.py's
+        # disable-outgoing-mail for what it actually does.
+        set +e
+        MAIL_OUT=$(ODOO_URL="$ODOO_URL" ODOO_LOGIN="$ODOO_LOGIN" ODOO_SECRET="$ODOO_SECRET" ODOO_DB="$ODOO_DB" python3 "$CRUD_TOOL" disable-outgoing-mail 2>&1)
+        MAIL_STATUS=$?
+        set -e
+        if [[ $MAIL_STATUS -eq 0 ]]; then
+            info "  ✔ Outgoing mail disabled for this run (no real email will be sent)"
+        else
+            warn "Could not disable outgoing mail on this database: $MAIL_OUT"
+            warn "  → Proceeding anyway, but this demo database may send real email."
+        fi
         break
     else
         err_msg=$(printf '%s' "$AUTH_OUT" | python3 -c "import sys, json; print(json.load(sys.stdin).get('error', ''))" 2>/dev/null || true)
