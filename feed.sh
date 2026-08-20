@@ -39,6 +39,11 @@ AI_CLI="${AI_CLI:-}"
 OPENROUTER_MODEL="${OPENROUTER_MODEL-deepseek/deepseek-v4-flash-latest}"
 RAW="https://raw.githubusercontent.com/${REPO}/${REPO_REF}"
 BIN_DIR="$HOME/.local/bin"
+# Everything installed here — the feeder, gum, and every AI CLI's own
+# installer — lands in ~/.local/bin, which a fresh login shell does not have
+# on PATH. Export it before the first `command -v`, or that check misses a
+# binary already sitting there and reinstalls it on every run.
+export PATH="$BIN_DIR:$PATH"
 DATA_DIR="$HOME/.local/share/odoo-demo-feeder"
 
 PURPLE=$'\e[38;5;97m'; GREEN=$'\e[32m'; RED=$'\e[31m'; DIM=$'\e[2m'; RESET=$'\e[0m'
@@ -337,7 +342,6 @@ if command -v "$BIN" >/dev/null 2>&1; then
     ok "$BIN already present"
 else
     provider_install
-    export PATH="$HOME/.local/bin:$PATH"
     command -v "$BIN" >/dev/null 2>&1 && { provider_post_install; ok "$BIN installed"; } \
         || warn "$BIN installed but not on PATH yet — open a new terminal and run '$BIN' once to log in."
 fi

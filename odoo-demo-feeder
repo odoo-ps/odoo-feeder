@@ -31,6 +31,10 @@ SKILLS_REPO="${SKILLS_REPO-odoo-ps/odoo-feeder}"
 BOOTSTRAP="bash <(curl -fsSL https://raw.githubusercontent.com/odoo-ps/odoo-feeder/main/feed.sh)"
 
 CRUD_TOOL="${CRUD_TOOL:-$HOME/.local/share/odoo-demo-feeder/odoo_crud.py}"
+# The AI CLI lives in ~/.local/bin, which a fresh login shell does not have on
+# PATH. Run straight from a checkout rather than through feed.sh and nothing
+# else will have added it, so the provider looks missing when it is installed.
+export PATH="$HOME/.local/bin:$PATH"
 # Which AI CLI drives the agent: "copilot" (GitHub Copilot CLI, default), "agy"
 # (Antigravity) or "claude" (Claude Code).
 AI_CLI="${AI_CLI:-copilot}"
