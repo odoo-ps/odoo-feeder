@@ -15,7 +15,8 @@
 # nicer prompts), asks which AI CLI should drive the agent and installs that one
 # alone, fetches the latest feeder + CRUD tool, then launches. Re-running is
 # cheap: anything already present is skipped. Pre-answer the question with
-# AI_CLI=copilot or --ai-cli copilot and it is not asked.
+# AI_CLI=copilot or --ai-cli copilot and it is not asked; copilot on OpenRouter
+# is the default the prompt offers first.
 #
 set -euo pipefail
 
@@ -29,8 +30,9 @@ REPO_REF="${REPO_REF:-main}"
 # default is a question, not a provider.
 AI_CLI="${AI_CLI:-}"
 # OpenRouter BYOK, 'copilot' only (see odoo-demo-feeder --help). Its presence
-# here just tells the sign-in probe below that no GitHub login is needed.
-OPENROUTER_MODEL="${OPENROUTER_MODEL:-}"
+# here just tells the sign-in probe below that no GitHub login is needed, so the
+# default run never asks for a GitHub login. Set it empty for GitHub's routing.
+OPENROUTER_MODEL="${OPENROUTER_MODEL-deepseek/deepseek-v4-flash-0731}"
 RAW="https://raw.githubusercontent.com/${REPO}/${REPO_REF}"
 BIN_DIR="$HOME/.local/bin"
 DATA_DIR="$HOME/.local/share/odoo-demo-feeder"
@@ -181,7 +183,7 @@ ai_cli_from_args() {
 
 # choose_ai_cli — ask which one to install. Prints the bare provider name.
 choose_ai_cli() {
-    local labels=("agy — Antigravity" "copilot — GitHub Copilot CLI" "claude — Claude Code")
+    local labels=("copilot — GitHub Copilot CLI, on OpenRouter (default)" "agy — Antigravity" "claude — Claude Code")
     local pick=""
     if command -v gum >/dev/null 2>&1; then
         # '|| true': a cancelled or failed gum must fall through to the default
@@ -246,8 +248,8 @@ if [[ -z "$AI_CLI" ]]; then
     if [[ -t 0 ]]; then
         AI_CLI="$(choose_ai_cli)"
     else
-        AI_CLI="agy"
-        warn "No terminal to ask on — installing agy. Set AI_CLI to choose."
+        AI_CLI="copilot"
+        warn "No terminal to ask on — installing copilot. Set AI_CLI to choose."
     fi
 fi
 provider_supported

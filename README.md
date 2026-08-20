@@ -22,8 +22,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/odoo-ps/odoo-feeder/main/fee
   --scope "Bakery" --company "Maison Rorive" --website https://www.maisonrorive.be
 ```
 
-> First run only: launch the CLI you picked once and sign in (`agy` with Google,
-> `copilot` with GitHub, `claude` with Anthropic).
+> First run only: sign in to the CLI you picked (`agy` with Google, `claude` with
+> Anthropic). The default copilot-on-OpenRouter setup needs no sign-in — just the
+> keyring key below.
 > The public `odoo.com` site is blocked as a target.
 
 ## Templates
@@ -53,29 +54,30 @@ when it is available, and fall back to plain prompts otherwise.
 
 ## AI CLI providers
 
-Three are supported: [`agy`](https://antigravity.google) (Antigravity),
-`copilot` (GitHub Copilot CLI) and `claude` (Claude Code). The bootstrap asks
-which one you want and installs only that one; `--ai-cli copilot` or
-`AI_CLI=copilot` answers ahead of time, and `agy` is the fallback when there is
-no terminal to ask on. The feeder itself still defaults to `agy` when run
-directly.
+Three are supported: `copilot` (GitHub Copilot CLI),
+[`agy`](https://antigravity.google) (Antigravity) and `claude` (Claude Code).
+The bootstrap asks which one you want and installs only that one, offering
+`copilot` first; `--ai-cli agy` or `AI_CLI=agy` answers ahead of time, and
+`copilot` is the fallback when there is no terminal to ask on.
 
-`copilot` can also be routed through [OpenRouter](https://openrouter.ai) instead of
-GitHub's own model routing, via Copilot's BYOK support. The API key is never passed
-as a flag or plaintext env var — store it once in the OS keyring:
+The default run is **copilot routed through [OpenRouter](https://openrouter.ai)**
+on `deepseek/deepseek-v4-flash-0731`, via Copilot's BYOK support — so no GitHub
+sign-in is needed at all. The API key is never passed as a flag or plaintext env
+var; store it once in the OS keyring:
 
 ```bash
 keyring set odoo-feeder openrouter-api-key
 ```
 
-then run with:
+To use a different model, or GitHub's own routing:
 
 ```bash
-odoo-demo-feeder --ai-cli copilot --openrouter-model anthropic/claude-sonnet-4.5 ...
+odoo-demo-feeder --openrouter-model anthropic/claude-sonnet-4.5 ...
+odoo-demo-feeder --openrouter-model ''    # GitHub's routing, needs a GitHub login
 ```
 
-(`OPENROUTER_MODEL` env var works the same way.) No GitHub sign-in is required once
-OpenRouter is active.
+(`OPENROUTER_MODEL` works the same way.) The model applies to `copilot` only; with
+another `--ai-cli` the default is ignored rather than being an error.
 
 ## Debugging a run
 

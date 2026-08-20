@@ -31,16 +31,18 @@ SKILLS_REPO="${SKILLS_REPO-odoo-ps/odoo-feeder}"
 BOOTSTRAP="bash <(curl -fsSL https://raw.githubusercontent.com/odoo-ps/odoo-feeder/main/feed.sh)"
 
 CRUD_TOOL="${CRUD_TOOL:-$HOME/.local/share/odoo-demo-feeder/odoo_crud.py}"
-# Which AI CLI drives the agent: "agy" (Antigravity, default), "copilot"
-# (GitHub Copilot CLI) or "claude" (Claude Code).
-AI_CLI="${AI_CLI:-agy}"
+# Which AI CLI drives the agent: "copilot" (GitHub Copilot CLI, default), "agy"
+# (Antigravity) or "claude" (Claude Code).
+AI_CLI="${AI_CLI:-copilot}"
 AGY_TIMEOUT="${AGY_TIMEOUT:-20m}"   # headless print-mode budget (research+install+imports)
-# OpenRouter BYOK, 'copilot' provider only: set to an OpenRouter model id (e.g.
-# anthropic/claude-sonnet-4.5) to route Copilot through OpenRouter instead of
-# GitHub's own model routing. The API key is never accepted as a flag or
-# plaintext env var — store it once in the OS keyring first:
+# OpenRouter BYOK, 'copilot' provider only: an OpenRouter model id routing
+# Copilot through OpenRouter instead of GitHub's own model routing. Defaulted,
+# so the standard run is copilot on OpenRouter; set it empty to fall back to
+# GitHub's routing. The API key is never accepted as a flag or plaintext env
+# var — store it once in the OS keyring first:
 #   keyring set odoo-feeder openrouter-api-key
-OPENROUTER_MODEL="${OPENROUTER_MODEL:-}"
+if [[ -n "${OPENROUTER_MODEL+set}" ]]; then OPENROUTER_MODEL_EXPLICIT=1; else OPENROUTER_MODEL_EXPLICIT=0; fi
+OPENROUTER_MODEL="${OPENROUTER_MODEL-deepseek/deepseek-v4-flash-0731}"
 OPENROUTER_KEYRING_SERVICE="odoo-feeder"
 OPENROUTER_KEYRING_ACCOUNT="openrouter-api-key"
 
@@ -297,11 +299,17 @@ Other:
   -i, --interactive     Drive the AI agent interactively (advanced).
       --plan            Review a plan and approve it before any change is made
                         (implies interactive).
-      --ai-cli NAME     AI CLI to drive the agent: 'agy' (Antigravity, default),
-                        'copilot' (GitHub Copilot CLI) or 'claude' (Claude Code). [AI_CLI]
+      --ai-cli NAME     AI CLI to drive the agent: 'copilot' (GitHub Copilot
+                        CLI, default), 'agy' (Antigravity) or 'claude' (Claude
+                        Code). [AI_CLI]
       --openrouter-model ID   Route 'copilot' through OpenRouter using this model
-                        id (e.g. anthropic/claude-sonnet-4.5), instead of
-                        GitHub's own model routing. [OPENROUTER_MODEL]
+                        id, instead of GitHub's own model routing.
+                        [OPENROUTER_MODEL]
+                        Defaults to deepseek/deepseek-v4-flash-0731, so the
+                        standard run is copilot on OpenRouter. Pass it empty
+                        (--openrouter-model '') for GitHub's routing. It applies
+                        to 'copilot' only, and is simply ignored — not an error —
+                        when another --ai-cli is chosen.
                         The API key is read from the OS keyring, never from a
                         flag or plaintext env var — store it once with:
                           keyring set odoo-feeder openrouter-api-key
@@ -334,7 +342,7 @@ while [[ $# -gt 0 ]]; do
         --notes|--extra)       need_val "$1" "${2:-}"; EXTRA="$2";        GAVE_ARGS=1; shift 2 ;;
         --template)            need_val "$1" "${2:-}"; TEMPLATE_FILE="$2"; GAVE_ARGS=1; shift 2 ;;
         --ai-cli)              need_val "$1" "${2:-}"; AI_CLI="$2";        shift 2 ;;
-        --openrouter-model)    need_val "$1" "${2:-}"; OPENROUTER_MODEL="$2"; shift 2 ;;
+        --openrouter-model)    need_val "$1" "${2:-}"; OPENROUTER_MODEL="$2"; OPENROUTER_MODEL_EXPLICIT=1; shift 2 ;;
         -i|--interactive)      INTERACTIVE=1; shift ;;
         --plan)                PLAN=1; INTERACTIVE=1; shift ;;
         -h|--help)             usage; exit 0 ;;
@@ -407,9 +415,16 @@ AI_MODEL="${AI_MODEL:-$AGY_MODEL}"
 # just resolves the API key from the OS keyring and exports the right ones;
 # no GitHub sign-in is needed once this is active.
 # --------------------------------------------------------------------------- #
-if [[ -n "$OPENROUTER_MODEL" ]]; then
-    [[ "$AI_CLI" == "copilot" ]] \
+# The model is copilot-only. Asked for explicitly against another CLI that is a
+# mistake worth stopping for; arriving by default it simply does not apply, and
+# killing the run over a value nobody typed would make --ai-cli claude unusable.
+if [[ -n "$OPENROUTER_MODEL" && "$AI_CLI" != "copilot" ]]; then
+    [[ "$OPENROUTER_MODEL_EXPLICIT" -eq 0 ]] \
         || die "--openrouter-model / OPENROUTER_MODEL only applies to --ai-cli copilot."
+    OPENROUTER_MODEL=""
+fi
+
+if [[ -n "$OPENROUTER_MODEL" ]]; then
     command -v keyring >/dev/null 2>&1 \
         || die "The 'keyring' CLI is required to read the OpenRouter API key (pip install keyring), then:
    keyring set $OPENROUTER_KEYRING_SERVICE $OPENROUTER_KEYRING_ACCOUNT"
