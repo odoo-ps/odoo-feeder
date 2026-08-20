@@ -55,6 +55,15 @@ COMPANY_NAME="${COMPANY_NAME:-}"
 COMPANY_SITE="${COMPANY_SITE:-}"
 EXTRA="${EXTRA:-}"
 ODOO_SIZE="${ODOO_SIZE:-}"   # small | medium | big (dataset volume)
+ODOO_LANG="${ODOO_LANG:-}"      # language the demo data is written in
+ODOO_COUNTRY="${ODOO_COUNTRY:-}"  # country and currency, e.g. "Vietnam (VND)"
+ODOO_FLAGSHIP="${ODOO_FLAGSHIP:-}"  # one product or vendor to put front and centre
+# Which end-to-end flows the data has to support, comma-separated. Keys:
+#   trading    — confirmed SO raises the PO, invoice and vendor bill wired up
+#   mrp        — BoMs, and a confirmed SO triggering an MO plus component PO
+#   accounting — post those invoices and bills so the reports fill in
+#   analytics  — spread orders over a rolling 90 days for trend charts
+ODOO_FLOWS="${ODOO_FLOWS:-}"
 
 # A sales "template": a free-text block (pasted or loaded from --template FILE)
 # describing the demo to build. It is passed to the AI verbatim — never parsed —
@@ -128,6 +137,24 @@ ui_choose() {  # ui_choose <header> <option>...  -> prints the chosen option
         fi
     fi
 }
+ui_multi() {  # ui_multi <header> <option>...  -> prints each chosen option on its own line
+    local header="$1"; shift
+    if [[ "$HAS_GUM" -eq 1 ]]; then
+        # Space toggles, Enter confirms; picking nothing is a legitimate answer.
+        gum choose --no-limit --header "$header" "$@" || true
+    else
+        local opt i=1
+        printf '  %s\n' "$header" >&2
+        for opt in "$@"; do printf '    %d) %s\n' "$i" "$opt" >&2; i=$((i+1)); done
+        local reply; read -r -p "  Choices (comma-separated numbers, Enter for none): " reply
+        local sel
+        local IFS=','
+        for sel in $reply; do
+            sel="${sel//[[:space:]]/}"
+            [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= $# )) && printf '%s\n' "${!sel}"
+        done
+    fi
+}
 ui_write() {  # ui_write [placeholder]  -> prints the pasted multi-line text
     if [[ "$HAS_GUM" -eq 1 ]]; then
         # In gum ≥0.16, Enter submits and Ctrl+J inserts a newline; a pasted block
@@ -145,6 +172,53 @@ ui_header() {  # ui_header <text>
     else
         info "$*"
     fi
+}
+
+# The workflow options from the intake form. The sales person picks prose; the
+# agent receives keys, so the wording can change without breaking the prompt.
+ask_workflows() {
+    local picked line out=()
+    picked="$(ui_multi "Which demo workflows should the data support?" \
+        "Sales & Purchasing — a confirmed SO raises the PO, with invoice and vendor bill wired" \
+        "Manufacturing — BoMs, and a confirmed SO triggering an MO plus a component PO" \
+        "Invoicing — post the invoices and bills so P&L, balance sheet and cashflow fill in" \
+        "Analytics — spread orders across a rolling 90 days for trend charts")"
+    while IFS= read -r line; do
+        case "$line" in
+            "Sales & Purchasing"*) out+=("trading") ;;
+            "Manufacturing"*)      out+=("mrp") ;;
+            "Invoicing"*)          out+=("accounting") ;;
+            "Analytics"*)          out+=("analytics") ;;
+        esac
+    done <<< "$picked"
+    (IFS=','; printf '%s' "${out[*]:-}")
+}
+
+# normalise_workflows <list> — comma/space separated keys in, known keys out.
+# 'all' is a convenience for every flow; anything unknown is dropped with a
+# warning, because silently accepting it would promise a flow nobody builds.
+normalise_workflows() {
+    local raw="$1" key resolved out=() seen
+    raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr ' ' ',')"
+    local IFS=','
+    for key in $raw; do
+        case "$key" in
+            "")         continue ;;
+            all)        out=("trading" "mrp" "accounting" "analytics"); continue ;;
+            none)       out=(); continue ;;
+            trading|sales|purchasing) resolved="trading" ;;
+            mrp|manufacturing)        resolved="mrp" ;;
+            accounting|invoicing)     resolved="accounting" ;;
+            analytics|trends)         resolved="analytics" ;;
+            *) warn "Unknown workflow '$key' — ignoring it."; continue ;;
+        esac
+        # Two spellings of one flow ("sales" and "purchasing") are one flow.
+        for seen in ${out[*]:-}; do
+            [[ "$seen" == "$resolved" ]] && { resolved=""; break; }
+        done
+        [[ -z "$resolved" ]] || out+=("$resolved")
+    done
+    (IFS=','; printf '%s' "${out[*]:-}")
 }
 
 # Validate an Odoo URL: must be http(s), and never the public odoo.com site.
@@ -198,6 +272,16 @@ Content:
   --size SIZE           Dataset volume: small | medium | big (default medium) [ODOO_SIZE]
   --company NAME        Customer company to research     [COMPANY_NAME]
   --website URL         Customer website to research     [COMPANY_SITE]
+  --language TEXT       Language to write the demo data in, e.g. Vietnamese [ODOO_LANG]
+  --country TEXT        Country and currency, e.g. "Vietnam (VND)"  [ODOO_COUNTRY]
+                        Omitted, they are taken from the researched website.
+  --workflows LIST      End-to-end flows the data must support     [ODOO_FLOWS]
+                        Comma-separated, any of: trading (SO raises the PO, with
+                        invoice and bill), mrp (BoMs, SO triggers an MO and a
+                        component PO), accounting (post them so the reports
+                        fill in), analytics (spread over a rolling 90 days).
+                        'all' selects every one, 'none' selects nothing.
+  --flagship TEXT       One product or vendor to feature  [ODOO_FLAGSHIP]
   --notes TEXT          Extra free-text instructions for the AI  [EXTRA]
                         e.g. "also create 5 sales orders and a few invoices"
   --template FILE       Load a template file describing the demo to build and
@@ -250,6 +334,10 @@ while [[ $# -gt 0 ]]; do
         --size)                need_val "$1" "${2:-}"; ODOO_SIZE="$2";    GAVE_ARGS=1; shift 2 ;;
         --company)             need_val "$1" "${2:-}"; COMPANY_NAME="$2"; GAVE_ARGS=1; shift 2 ;;
         --website)             need_val "$1" "${2:-}"; COMPANY_SITE="$2"; GAVE_ARGS=1; shift 2 ;;
+        --language|--lang)     need_val "$1" "${2:-}"; ODOO_LANG="$2";    GAVE_ARGS=1; shift 2 ;;
+        --country)             need_val "$1" "${2:-}"; ODOO_COUNTRY="$2"; GAVE_ARGS=1; shift 2 ;;
+        --workflows|--flows)   need_val "$1" "${2:-}"; ODOO_FLOWS="$2";   GAVE_ARGS=1; shift 2 ;;
+        --flagship)            need_val "$1" "${2:-}"; ODOO_FLAGSHIP="$2"; GAVE_ARGS=1; shift 2 ;;
         --notes|--extra)       need_val "$1" "${2:-}"; EXTRA="$2";        GAVE_ARGS=1; shift 2 ;;
         --template)            need_val "$1" "${2:-}"; TEMPLATE_FILE="$2"; GAVE_ARGS=1; shift 2 ;;
         --ai-cli)              need_val "$1" "${2:-}"; AI_CLI="$2";        shift 2 ;;
@@ -644,7 +732,17 @@ if [[ -z "$TEMPLATE_TEXT" ]]; then
         [[ -n "$ODOO_SIZE" ]]    || ODOO_SIZE="$(ui_choose "Dataset size" small medium big)"
         [[ -n "$COMPANY_NAME" ]] || COMPANY_NAME="$(ui_input "Customer company name" "optional, Enter to skip")"
         [[ -n "$COMPANY_SITE" ]] || COMPANY_SITE="$(ui_input "Customer website" "optional, e.g. https://acme.com")"
+        [[ -n "$ODOO_LANG" ]]    || ODOO_LANG="$(ui_input "Demo language" "optional, e.g. English, Vietnamese, French")"
+        [[ -n "$ODOO_COUNTRY" ]] || ODOO_COUNTRY="$(ui_input "Country & currency" "optional, e.g. Vietnam (VND) — Enter to take it from the website")"
+        [[ -n "$ODOO_FLOWS" ]]   || ODOO_FLOWS="$(ask_workflows)"
+        [[ -n "$ODOO_FLAGSHIP" ]] || ODOO_FLAGSHIP="$(ui_input "Flagship product or vendor to feature" "optional, e.g. Oak Dining Table")"
         [[ -n "$EXTRA" ]]        || EXTRA="$(ui_input "Anything else the AI should do?" "optional, e.g. also create 5 sales orders")"
+    fi
+
+    # Accept the keys from --workflows too, and drop anything unrecognised rather
+    # than passing a typo through to the agent as if it meant something.
+    if [[ -n "$ODOO_FLOWS" ]]; then
+        ODOO_FLOWS="$(normalise_workflows "$ODOO_FLOWS")"
     fi
 
     # Normalise the dataset size (default medium; fall back on anything unexpected).
@@ -825,12 +923,61 @@ anchor + ratios in the skill's 'Dataset size' section.
 "
 fi
 
+# Intake answers that are not part of the target description. Each line appears
+# only when it was answered: an unanswered question adds nothing, rather than a
+# "(not given)" for the agent to interpret.
+INTAKE_DESC=""
+if [[ -n "$ODOO_LANG" ]]; then
+    INTAKE_DESC+="
+  Demo language: ${ODOO_LANG} — write every record's text in it."
+fi
+if [[ -n "$ODOO_COUNTRY" ]]; then
+    INTAKE_DESC+="
+  Country & currency: ${ODOO_COUNTRY} — set both on res.company."
+fi
+if [[ -n "$ODOO_FLAGSHIP" ]]; then
+    INTAKE_DESC+="
+  Feature prominently: ${ODOO_FLAGSHIP}."
+fi
+[[ -z "$INTAKE_DESC" ]] || INTAKE_DESC="
+${INTAKE_DESC}
+"
+
+# The workflow options, expanded from keys into what each one has to produce.
+WORKFLOW_DESC=""
+if [[ -n "$ODOO_FLOWS" ]]; then
+    WORKFLOW_DESC="
+These end-to-end flows must work in the finished database, built on top of the
+records the skill's run creates:"
+    IFS=',' read -r -a WF_KEYS <<< "$ODOO_FLOWS"
+    for wf in "${WF_KEYS[@]}"; do
+        case "$wf" in
+            trading) WORKFLOW_DESC+="
+  • Sales & purchasing: confirmed sale orders that raise the purchase order to
+    the vendor, with the customer invoice and vendor bill created and linked
+    back to their order." ;;
+            mrp) WORKFLOW_DESC+="
+  • Manufacturing: bills of materials linking components to finished goods, and
+    a confirmed sale order that triggers a manufacturing order plus the
+    purchase order for its components." ;;
+            accounting) WORKFLOW_DESC+="
+  • Invoicing: post those customer invoices and vendor bills, so the P&L,
+    balance sheet and cashflow reports are populated rather than empty." ;;
+            analytics) WORKFLOW_DESC+="
+  • Analytics: date the orders and invoices across a rolling 90-day window, so
+    the trend charts show a line instead of a single spike." ;;
+        esac
+    done
+    WORKFLOW_DESC+="
+"
+fi
+
 REQUEST="You are populating an Odoo demo database for a sales demo.
 
 Follow the 'odoo-demo-csv' skill end to end — it defines the whole run and how to
 narrate it.
 
-${SIZE_DIRECTIVE}${TARGET_DESC}
+${SIZE_DIRECTIVE}${TARGET_DESC}${INTAKE_DESC}${WORKFLOW_DESC}
 
 Wherever the skill says 'odoo-crud', run:
 
