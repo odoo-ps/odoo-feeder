@@ -492,6 +492,76 @@ def cmd_install_modules(args):
     })
 
 
+def cmd_resolve(args):
+    """Map external ids to the database ids every later call needs.
+
+    Records go in by external id, and everything afterwards — action_confirm,
+    set-image, an order line referencing a product — needs the integer Odoo
+    assigned. Nothing about the import reveals those: an external id's position
+    in the CSV is not its database id, and a single record already sitting in
+    the model shifts every one of them. Guessing writes order lines against the
+    wrong products and still returns ok: true, so it is only found by reading
+    the finished demo.
+
+    import-csv files its ids under the '__import__' module, Odoo's prefix for an
+    external id with no dot in it. Each entry carries the record's display name
+    so a wrong pairing can be seen rather than deduced.
+    """
+    model = args.model
+    domain = [["model", "=", model]]
+    if args.module:
+        domain.append(["module", "=", args.module])
+
+    bare = None
+    if args.xmlids:
+        names = parse_json(args.xmlids, "--xmlids")
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+            fail("--xmlids must be a JSON array of external id strings.")
+        # Accept 'product_1' and '__import__.product_1' alike.
+        bare = [n.split(".", 1)[-1] for n in names]
+        domain.append(["name", "in", bare])
+
+    recs = execute(
+        "ir.model.data", "search_read", [domain],
+        {"fields": ["module", "name", "res_id"]},
+    )
+
+    # search_read rather than read: a stale ir.model.data row pointing at a
+    # deleted record is skipped instead of failing the whole call.
+    labels = {}
+    if recs:
+        rows = execute(
+            model, "search_read", [[["id", "in", [r["res_id"] for r in recs]]]],
+            {"fields": ["display_name"]},
+        ) or []
+        labels = {row["id"]: row.get("display_name") for row in rows}
+
+    entries = sorted(
+        (
+            {
+                "external_id": "%s.%s" % (r["module"], r["name"]),
+                "xmlid": r["name"],
+                "db_id": r["res_id"],
+                "name": labels.get(r["res_id"]),
+            }
+            for r in recs
+        ),
+        key=lambda e: e["db_id"],
+    )
+    result = {
+        "model": model,
+        "count": len(entries),
+        "map": {e["xmlid"]: e["db_id"] for e in entries},
+        "records": entries,
+    }
+    if bare is not None:
+        found = {e["xmlid"] for e in entries}
+        result["missing"] = [n for n in bare if n not in found]
+        if result["missing"]:
+            fail_result(result)
+    ok(result)
+
+
 def _ensure_base_import_module():
     """Make sure the module providing the industry download path is installed.
 
@@ -903,6 +973,31 @@ def build_parser():
              "like a running business.",
     )
 
+    p = sub.add_parser(
+        "resolve",
+        help="Map external ids to database ids for a model.",
+        description=(
+            "Everything is imported by external id; action_confirm, set-image "
+            "and any order line need the database id instead. An external id's "
+            "position in the CSV is NOT its database id — one record already in "
+            "the model shifts every one — and referencing the wrong id still "
+            "returns ok: true. Read the map here before wiring anything. Each "
+            "entry carries the record's display name, so check a couple by eye."
+        ),
+    )
+    p.add_argument("model")
+    p.add_argument(
+        "--xmlids",
+        help="JSON array of external ids to resolve, e.g. '[\"product_1\"]'. "
+             "Omitted, every external id known for the model comes back. "
+             "Anything not found is listed in 'missing' and the call fails.",
+    )
+    p.add_argument(
+        "--module",
+        help="External-id module prefix to filter on. Use '__import__' for the "
+             "records this run imported, which is where import-csv files them.",
+    )
+
     p = sub.add_parser("set-image", help="Set a record image from a URL or file.")
     p.add_argument("model")
     p.add_argument("--id", type=int, required=True, help="Record id.")
@@ -937,6 +1032,7 @@ HANDLERS = {
     "fields": cmd_fields,
     "install-modules": cmd_install_modules,
     "install-industry": cmd_install_industry,
+    "resolve": cmd_resolve,
     "set-image": cmd_set_image,
     "import-preview": cmd_import_preview,
     "import-csv": cmd_import_csv,

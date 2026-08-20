@@ -151,6 +151,21 @@ Import in **dependency order** so every reference resolves:
    `Qualified` or `Proposition`). Write every `description` in the **customer's
    voice** — the two or three lines that prospect sent in, naming the real
    product they are asking about and what they need it for.
+Before wiring anything to anything, **read the id map**:
+
+```
+odoo-crud resolve product.template --module __import__
+odoo-crud resolve res.partner --module __import__
+```
+
+Everything above went in by external id. Every call from here on — an order
+line, `action_confirm`, `set-image` — takes the database id Odoo assigned, and
+`product_1` is not database id 1. One record already sitting in the model
+shifts the whole sequence: a seeded `Booking Fees` product takes id 1 and every
+product you imported is one further along than its name suggests. An order line
+built on the guess still imports, still returns `ok: true`, and sells the wrong
+product. Check two entries in the map against their `name` before you use it.
+
 5. **Linked Workflows (SO -> MO -> PO)** — wire and trigger the full supply chain so the demo is fully interactive with zero duplicate records.
    - **Vendor on the product first (`product.supplierinfo`).** Every purchased product/raw material needs a supplier link — without it, Odoo cannot auto-generate RFQs. Create `product.supplierinfo` records with `partner_id/id` (vendor), `product_tmpl_id/id`, `price` (`standard_price`), and delivery delay.
    - **`mrp.bom` (When manufacturing):**
