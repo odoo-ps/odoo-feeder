@@ -61,7 +61,7 @@ The bootstrap asks which one you want and installs only that one, offering
 `copilot` is the fallback when there is no terminal to ask on.
 
 The default run is **copilot routed through [OpenRouter](https://openrouter.ai)**
-on `deepseek/deepseek-v4-flash-0731`, via Copilot's BYOK support — so no GitHub
+on `deepseek/deepseek-v4-flash-latest`, via Copilot's BYOK support — so no GitHub
 sign-in is needed at all. The API key is never passed as a flag or plaintext env
 var; store it once in the OS keyring:
 

@@ -32,7 +32,7 @@ AI_CLI="${AI_CLI:-}"
 # OpenRouter BYOK, 'copilot' only (see odoo-demo-feeder --help). Its presence
 # here just tells the sign-in probe below that no GitHub login is needed, so the
 # default run never asks for a GitHub login. Set it empty for GitHub's routing.
-OPENROUTER_MODEL="${OPENROUTER_MODEL-deepseek/deepseek-v4-flash-0731}"
+OPENROUTER_MODEL="${OPENROUTER_MODEL-deepseek/deepseek-v4-flash-latest}"
 RAW="https://raw.githubusercontent.com/${REPO}/${REPO_REF}"
 BIN_DIR="$HOME/.local/bin"
 DATA_DIR="$HOME/.local/share/odoo-demo-feeder"

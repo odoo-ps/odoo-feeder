@@ -42,7 +42,7 @@ AGY_TIMEOUT="${AGY_TIMEOUT:-20m}"   # headless print-mode budget (research+insta
 # var — store it once in the OS keyring first:
 #   keyring set odoo-feeder openrouter-api-key
 if [[ -n "${OPENROUTER_MODEL+set}" ]]; then OPENROUTER_MODEL_EXPLICIT=1; else OPENROUTER_MODEL_EXPLICIT=0; fi
-OPENROUTER_MODEL="${OPENROUTER_MODEL-deepseek/deepseek-v4-flash-0731}"
+OPENROUTER_MODEL="${OPENROUTER_MODEL-deepseek/deepseek-v4-flash-latest}"
 OPENROUTER_KEYRING_SERVICE="odoo-feeder"
 OPENROUTER_KEYRING_ACCOUNT="openrouter-api-key"
 
@@ -305,7 +305,7 @@ Other:
       --openrouter-model ID   Route 'copilot' through OpenRouter using this model
                         id, instead of GitHub's own model routing.
                         [OPENROUTER_MODEL]
-                        Defaults to deepseek/deepseek-v4-flash-0731, so the
+                        Defaults to deepseek/deepseek-v4-flash-latest, so the
                         standard run is copilot on OpenRouter. Pass it empty
                         (--openrouter-model '') for GitHub's routing. It applies
                         to 'copilot' only, and is simply ignored — not an error —
