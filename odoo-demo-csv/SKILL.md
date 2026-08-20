@@ -41,9 +41,11 @@ command available to you, and it reads its credentials from the environment.
 Use your own file tools to write the CSVs and your browsing tools to research —
 writing CSV into the chat instead of into a file imports nothing.
 
-When a call fails, a record you know exists comes back missing, or a number
-reads zero after a green import, the cause is almost always one of the Odoo
-behaviours collected in [`ODOO-TRAPS.md`](ODOO-TRAPS.md) — read it then.
+When a call fails, a record you know exists comes back missing, a number reads
+zero after a green import, or **a green call changed nothing** — a document
+still empty, a picking still not done, a date that would not move — the cause is
+almost always one of the Odoo behaviours collected in
+[`ODOO-TRAPS.md`](ODOO-TRAPS.md) — read it then.
 
 ## Run
 
@@ -175,6 +177,11 @@ product. Check two entries in the map against their `name` before you use it.
    - **`mrp.bom` (When manufacturing):**
       - Raw components: Set `route_ids/id` to include `stock.route_warehouse0_buy` and ensure `product.supplierinfo` is set.
       - Finished goods: Set `route_ids/id` to include `mrp.route_warehouse0_manufacture` and the unarchived `stock.route_warehouse0_mto`.
+      - **Read the routes back.** They do not always stick: a write of both has
+        come back holding MTO alone, with no error. `search-read
+        product.template --fields '["route_ids"]'` says what is really there.
+        MTO plus a BoM is enough to raise the MO, so a missing Manufacture route
+        is worth a narrated line rather than a fight.
       - Import `mrp.bom` and `mrp.bom.line` linking components to the finished product.
    - **`sale.order` + `sale.order.line`:** Import draft SOs linked to partner (`partner_id/id`) and CRM opportunity (`opportunity_id/id`), referencing the finished product variant in lines (`product_id/id`).
    - **Confirm the orders, then read what appeared.**
@@ -214,10 +221,13 @@ product. Check two entries in the map against their `name` before you use it.
       ```
      `delivered` is the wizard's name for a regular invoice, not a down payment.
      It invoices what each line's policy says is invoiceable, so a product set
-     to *Delivered quantities* invoices nothing until its delivery is validated
-     — `fields product.template --filter invoice_policy` tells you which you
-     have, and on `delivered` either validate the delivery first or write
-     `invoice_policy` to `order` on those products before invoicing.
+     to *Delivered quantities* invoices nothing until its delivery is validated.
+     Check with `fields product.template --filter invoice_policy` back in step 2
+     and write `order` **with the products**, before any order exists: changing
+     the policy afterwards does not make existing orders invoiceable, and Odoo
+     means it that way — see `ODOO-TRAPS.md` under nothing-to-invoice. Past that
+     point the honest route is validating the delivery, which is what the policy
+     is asking for and is its own trap entry.
    - **Vendor bills from the POs.** One call, because doing it by hand is five
      steps and the middle three are invisible until you read the document:
       ```bash
@@ -260,10 +270,16 @@ Four rules bind every CSV:
    over the finished records.
    ```bash
    odoo-crud spread-dates sale.order --days 90
-   odoo-crud spread-dates account.move --days 90 --domain '[["state","=","posted"]]'
    ```
    Run it **last**, after confirming and posting — both stamp fresh dates and
    would undo it.
+
+   Posted invoices need unposting first: their date is readonly, so
+   `spread-dates account.move` fails on exactly the records worth spreading.
+   `button_draft` → spread → clear `name` → `action_post`, the sequence in
+   [`ODOO-TRAPS.md`](ODOO-TRAPS.md) under the readonly-date symptom. Skipping the
+   `name` reset makes the repost fail on a number that no longer matches its
+   date.
 
    *Done when* a `search-read` of the spread model shows its dates ranging back
    across the window rather than clustered on today.
