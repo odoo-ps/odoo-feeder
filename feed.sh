@@ -21,6 +21,10 @@
 set -euo pipefail
 
 REPO="odoo-ps/odoo-feeder"
+# Where this script is running from, when that is a checkout. Empty for the
+# `bash <(curl ...)` form, whose $BASH_SOURCE is a process substitution with no
+# repo beside it — which is exactly when the tools have to be downloaded.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P || true)"
 # Git ref (branch, tag or commit) to fetch the feeder + CRUD tool from. Defaults
 # to main; override to test a branch, e.g. REPO_REF=imp-gum-templates.
 REPO_REF="${REPO_REF:-main}"
@@ -344,11 +348,22 @@ export ASSUME_SIGNED_IN=1
 step "Fetching the feeder and CRUD tool"
 # --------------------------------------------------------------------------- #
 mkdir -p "$BIN_DIR" "$DATA_DIR"
-[[ "$REPO_REF" != "main" ]] && ok "Using ref '$REPO_REF'"
-fetch_to "$RAW/odoo-demo-feeder" "$BIN_DIR/odoo-demo-feeder" || die "Could not download the feeder from $RAW."
-fetch_to "$RAW/odoo_crud.py"     "$DATA_DIR/odoo_crud.py"    || die "Could not download the CRUD tool from $RAW."
-chmod +x "$BIN_DIR/odoo-demo-feeder"
-ok "Feeder ready at $BIN_DIR/odoo-demo-feeder"
+# Run from a checkout, that checkout is what gets installed. Downloading the
+# default branch over it is how a bootstrap ends up pairing a local feed.sh with
+# a feeder old enough to ignore the answers this one just collected.
+if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/odoo-demo-feeder" && -f "$SCRIPT_DIR/odoo_crud.py" ]]; then
+    install -m755 "$SCRIPT_DIR/odoo-demo-feeder" "$BIN_DIR/odoo-demo-feeder" \
+        || die "Could not install the feeder from $SCRIPT_DIR."
+    install -m644 "$SCRIPT_DIR/odoo_crud.py" "$DATA_DIR/odoo_crud.py" \
+        || die "Could not install the CRUD tool from $SCRIPT_DIR."
+    ok "Feeder + CRUD tool from this checkout ($SCRIPT_DIR)"
+else
+    [[ "$REPO_REF" != "main" ]] && ok "Using ref '$REPO_REF'"
+    fetch_to "$RAW/odoo-demo-feeder" "$BIN_DIR/odoo-demo-feeder" || die "Could not download the feeder from $RAW."
+    fetch_to "$RAW/odoo_crud.py"     "$DATA_DIR/odoo_crud.py"    || die "Could not download the CRUD tool from $RAW."
+    chmod +x "$BIN_DIR/odoo-demo-feeder"
+    ok "Feeder ready at $BIN_DIR/odoo-demo-feeder (from $REPO/$REPO_REF)"
+fi
 echo
 
 # --------------------------------------------------------------------------- #
