@@ -948,10 +948,15 @@ export ODOO_CRUD_AUDIT_LOG="$HERE/.odoo-crud-calls.log"
 # exact Bash pattern for the CRUD wrapper plus Read/Write/Edit/WebFetch/WebSearch;
 # --disallowed-tools 'mcp__*' strips out any MCP servers the user's own global
 # ~/.claude config might define, so the allowlist can't be widened by config
-# already sitting on the machine. --permission-mode default is passed
-# explicitly so a locally saved bypassPermissions/acceptEdits default can't
-# silently widen what runs unattended. Same as the other providers, bwrap /
-# Seatbelt remains the hard backstop underneath.
+# already sitting on the machine. --permission-mode dontAsk (not 'default') is
+# what actually makes that allowlist exclusive: 'default' still prompts for
+# anything the allowlist doesn't cover — which is exactly what surfaced as a
+# confirmation dialog when the model wrote and then tried to *run* a throwaway
+# Python script instead of calling odoo-crud. 'dontAsk' auto-denies anything
+# outside --allowed-tools instead of asking, in both interactive and headless
+# -p mode, and also closes off a locally saved bypassPermissions/acceptEdits
+# default from silently widening what runs unattended. Same as the other
+# providers, bwrap / Seatbelt remains the hard backstop underneath.
 build_ai_argv() {
     local mode="${MODE:-batch}" request; request="$(cat "$HERE/request.txt")"
     case "$AI_CLI" in
@@ -975,10 +980,10 @@ build_ai_argv() {
         claude)
             local allowed=("Bash(odoo-crud:*)" "Read" "Write" "Edit" "WebFetch" "WebSearch")
             if [[ "$mode" == "interactive" ]]; then
-                AI_ARGV=("$AI_BIN" "$request" --model "$AI_MODEL" --permission-mode default \
+                AI_ARGV=("$AI_BIN" "$request" --model "$AI_MODEL" --permission-mode dontAsk \
                     --allowed-tools "${allowed[@]}" --disallowed-tools "mcp__*")
             else
-                AI_ARGV=("$AI_BIN" "$request" -p --model "$AI_MODEL" --permission-mode default \
+                AI_ARGV=("$AI_BIN" "$request" -p --model "$AI_MODEL" --permission-mode dontAsk \
                     --allowed-tools "${allowed[@]}" --disallowed-tools "mcp__*")
                 command -v timeout >/dev/null 2>&1 && AI_ARGV=(timeout "$AGY_TIMEOUT" "${AI_ARGV[@]}")
             fi
