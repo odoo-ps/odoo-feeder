@@ -19,7 +19,8 @@ set -euo pipefail
 # Public GitHub repo (owner/repo) holding the demo skills, pulled via `npx skills`.
 # Set it empty (SKILLS_REPO= odoo-demo-feeder) to skip the remote refresh and run
 # whatever is already in ~/.agents/skills — the way to try a skill edit unpushed.
-SKILLS_REPO="${SKILLS_REPO-odoo-ps/odoo-feeder}"
+REPO_REF="${REPO_REF:-main}"
+SKILLS_REPO="${SKILLS_REPO-odoo-ps/odoo-feeder#$REPO_REF}"
 
 # The one-line bootstrap that installs every dependency and fetches this tool.
 # Standalone-run error messages point here (there is no separate install.sh).
@@ -556,12 +557,12 @@ while :; do
         err_msg=$(printf '%s' "$AUTH_OUT" | python3 -c "import sys, json; print(json.load(sys.stdin).get('error', ''))" 2>/dev/null || true)
         [[ -n "$err_msg" ]] || err_msg="$AUTH_OUT"
         warn "Connection failed: $err_msg"
-        
+
         # If we cannot read input (non-interactive or not a TTY), die immediately
         if [[ ! -t 0 ]]; then
             die "Connection check failed and cannot prompt in non-interactive terminal."
         fi
-        
+
         echo
         info "Please re-enter your credentials."
         new_url=""
