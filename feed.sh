@@ -362,11 +362,14 @@ provider_supported
 step "Installing the AI CLI ($AI_CLI)"
 # --------------------------------------------------------------------------- #
 BIN="$(provider_bin)"
+if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
+    export PATH="$BIN_DIR:$PATH"
+fi
+hash -r 2>/dev/null || true
 if command -v "$BIN" >/dev/null 2>&1; then
     ok "$BIN already present"
 else
     provider_install
-    export PATH="$HOME/.local/bin:$PATH"
     command -v "$BIN" >/dev/null 2>&1 && { "$BIN" install || true; ok "$BIN installed"; } \
         || warn "$BIN installed but not on PATH yet — open a new terminal and run '$BIN' once to log in."
 fi
