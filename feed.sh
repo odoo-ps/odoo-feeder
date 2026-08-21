@@ -30,8 +30,12 @@ AI_CLI="${AI_CLI:-}"
 AI_CLI_GIVEN=0
 [[ -n "$AI_CLI" ]] && AI_CLI_GIVEN=1
 # OpenRouter BYOK, 'copilot' only (see odoo-demo-feeder --help). Its presence
-# here just tells the sign-in probe below that no GitHub login is needed.
+# here just tells the sign-in probe below that no GitHub login is needed. The
+# API key itself lives in the OS keyring under this service/account, same as
+# odoo-demo-feeder expects — see the keyring step further down.
 OPENROUTER_MODEL="${OPENROUTER_MODEL:-}"
+OPENROUTER_KEYRING_SERVICE="odoo-feeder"
+OPENROUTER_KEYRING_ACCOUNT="openrouter-api-key"
 
 # Parse options to detect AI_CLI and OPENROUTER_MODEL early, so we install and
 # check the right provider. We don't consume them (they must be forwarded to the feeder).
@@ -224,6 +228,42 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
     ensure_cmd bwrap bubblewrap       ::: bubblewrap
 fi
 ensure_gum                            # optional: nicer prompts, plain fallback
+
+# --------------------------------------------------------------------------- #
+# OpenRouter BYOK needs the 'keyring' CLI (from the Python 'keyring' package)
+# to read the API key, and an actual key stored before odoo-demo-feeder runs —
+# it only reads the keyring, it never prompts. Nothing to do here unless
+# OPENROUTER_MODEL is set.
+# --------------------------------------------------------------------------- #
+if [[ -n "$OPENROUTER_MODEL" ]]; then
+    step "Checking OpenRouter API key"
+    if command -v keyring >/dev/null 2>&1; then
+        ok "keyring already present"
+    else
+        warn "keyring not found — installing..."
+        case "$PM" in
+            apt)  $SUDO apt-get update -y >/dev/null 2>&1 || true
+                  $SUDO apt-get install -y python3-keyring ;;
+            dnf)  $SUDO dnf install -y python3-keyring ;;
+            *)    pip3 install --user keyring ;;
+        esac
+        command -v keyring >/dev/null 2>&1 \
+            || die "Could not install the 'keyring' CLI automatically. Install it yourself (e.g. 'pip install keyring') and re-run."
+        ok "keyring installed"
+    fi
+    if keyring get "$OPENROUTER_KEYRING_SERVICE" "$OPENROUTER_KEYRING_ACCOUNT" >/dev/null 2>&1; then
+        ok "OpenRouter API key already stored"
+    elif [[ -t 0 ]]; then
+        warn "No OpenRouter API key found in the OS keyring — let's store one."
+        keyring set "$OPENROUTER_KEYRING_SERVICE" "$OPENROUTER_KEYRING_ACCOUNT"
+        keyring get "$OPENROUTER_KEYRING_SERVICE" "$OPENROUTER_KEYRING_ACCOUNT" >/dev/null 2>&1 \
+            || die "Still no OpenRouter API key in the keyring."
+        ok "API key stored"
+    else
+        die "No OpenRouter API key found in the OS keyring and no terminal to prompt on. Store it with:
+   keyring set $OPENROUTER_KEYRING_SERVICE $OPENROUTER_KEYRING_ACCOUNT"
+    fi
+fi
 
 # --------------------------------------------------------------------------- #
 # Ask which AI CLI to drive the agent with, when neither --ai-cli nor the
