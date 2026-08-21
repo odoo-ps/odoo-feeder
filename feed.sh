@@ -187,6 +187,27 @@ ensure_gum() {
     return 0
 }
 
+# Plain `apt install nodejs` ships whatever the distro froze at install time —
+# Ubuntu 24.04 is stuck on 18.19.1. Use NodeSource's own repo to pin a current
+# major (24) instead; brew already tracks recent versions, so it needs no repo.
+ensure_node() {
+    command -v node >/dev/null 2>&1 && { ok "node already present"; return 0; }
+    [[ -n "$PM" ]] || die "node is missing and no supported package manager (apt/dnf/brew) was found. Install Node.js 24+ manually."
+    warn "node not found — installing..."
+    case "$PM" in
+        apt)
+            fetch https://deb.nodesource.com/setup_24.x | $SUDO bash - >/dev/null 2>&1
+            $SUDO apt-get install -y nodejs >/dev/null 2>&1 ;;
+        dnf)
+            fetch https://rpm.nodesource.com/setup_24.x | $SUDO bash - >/dev/null 2>&1
+            $SUDO dnf install -y nodejs >/dev/null 2>&1 ;;
+        brew)
+            brew install node >/dev/null 2>&1 ;;
+    esac
+    command -v node >/dev/null 2>&1 || die "Could not install node automatically. Please install Node.js 24+ and re-run."
+    ok "node installed"
+}
+
 # --------------------------------------------------------------------------- #
 # AI CLI provider dispatch — agy (Antigravity), copilot (GitHub Copilot CLI)
 # and claude (Claude Code) are implemented. Unknown providers fail fast,
@@ -220,7 +241,7 @@ step "Checking dependencies"
 # --------------------------------------------------------------------------- #
 [[ -n "$DL" ]] || die "curl or wget is required to bootstrap. Install one and re-run."
 ensure_cmd python3 python3            ::: python3        ::: python3
-ensure_cmd node    nodejs npm         ::: nodejs npm     ::: node
+ensure_node
 # The OS-level sandbox differs per platform: Linux uses bubblewrap (installable);
 # macOS uses Seatbelt via sandbox-exec, which is built into the OS — nothing to
 # install there, so we only require bwrap on Linux.
