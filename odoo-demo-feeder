@@ -1192,7 +1192,7 @@ AUDIT_LOG="$WORK/.odoo-crud-calls.log"
 
 set +e
 pty_run "$WORK/launch.sh" \
-    | sed "${SED_STREAM[@]}" "s/${ESC}\[[0-9;]*[A-Za-z]//g" | tr -d '\r' | tee "$LOG"
+    | sed "${SED_STREAM[@]}" "s/${ESC}\[[0-9;]*[A-Za-z]//g" | tr -d '\r' > "$LOG"
 status=${PIPESTATUS[0]}
 set -e
 
