@@ -22,9 +22,13 @@ REPO="odoo-ps/odoo-feeder"
 # Git ref (branch, tag or commit) to fetch the feeder + CRUD tool from. Defaults
 # to main; override to test a branch, e.g. REPO_REF=imp-gum-templates.
 REPO_REF="${REPO_REF:-main}"
-# Which AI CLI drives the agent: "agy" (Antigravity, default), "copilot"
-# (GitHub Copilot CLI) or "claude" (Claude Code).
-AI_CLI="${AI_CLI:-agy}"
+# Which AI CLI drives the agent: "agy" (Antigravity), "copilot" (GitHub
+# Copilot CLI) or "claude" (Claude Code). Prompted for further down when
+# neither --ai-cli nor this env var picks one; AI_CLI_GIVEN tracks that so
+# the prompt is skipped once either has.
+AI_CLI="${AI_CLI:-}"
+AI_CLI_GIVEN=0
+[[ -n "$AI_CLI" ]] && AI_CLI_GIVEN=1
 # OpenRouter BYOK, 'copilot' only (see odoo-demo-feeder --help). Its presence
 # here just tells the sign-in probe below that no GitHub login is needed.
 OPENROUTER_MODEL="${OPENROUTER_MODEL:-}"
@@ -38,10 +42,12 @@ while [[ $idx -le $# ]]; do
             next_idx=$((idx + 1))
             if [[ $next_idx -le $# ]]; then
                 AI_CLI="${!next_idx}"
+                AI_CLI_GIVEN=1
             fi
             ;;
         --ai-cli=*)
             AI_CLI="${!idx#*=}"
+            AI_CLI_GIVEN=1
             ;;
         --openrouter-model)
             next_idx=$((idx + 1))
@@ -205,8 +211,6 @@ provider_install() {
     esac
 }
 
-provider_supported
-
 # --------------------------------------------------------------------------- #
 step "Checking dependencies"
 # --------------------------------------------------------------------------- #
@@ -220,6 +224,38 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
     ensure_cmd bwrap bubblewrap       ::: bubblewrap
 fi
 ensure_gum                            # optional: nicer prompts, plain fallback
+
+# --------------------------------------------------------------------------- #
+# Ask which AI CLI to drive the agent with, when neither --ai-cli nor the
+# AI_CLI env var already picked one. Never silently fall back to agy: an
+# unattended run (no tty to prompt on) says so explicitly instead.
+# --------------------------------------------------------------------------- #
+if [[ "$AI_CLI_GIVEN" -eq 0 ]]; then
+    if [[ -t 0 ]]; then
+        step "Choosing the AI CLI"
+        if command -v gum >/dev/null 2>&1; then
+            AI_CLI="$(gum choose --header "Which AI CLI should drive the agent?" agy copilot claude)"
+        else
+            printf '%s\n' "Which AI CLI should drive the agent?"
+            printf '%s\n' "  1) agy      Antigravity"
+            printf '%s\n' "  2) copilot  GitHub Copilot CLI"
+            printf '%s\n' "  3) claude   Claude Code"
+            read -rp "Choice [1-3]: " reply
+            case "$reply" in
+                1) AI_CLI="agy" ;;
+                2) AI_CLI="copilot" ;;
+                3) AI_CLI="claude" ;;
+                *) die "Invalid choice: $reply" ;;
+            esac
+        fi
+        [[ -n "$AI_CLI" ]] || die "No AI CLI selected."
+        ok "Using $AI_CLI"
+    else
+        AI_CLI="agy"
+        warn "No --ai-cli given and no terminal to prompt on — defaulting to agy."
+    fi
+fi
+provider_supported
 
 # --------------------------------------------------------------------------- #
 step "Installing the AI CLI ($AI_CLI)"
@@ -325,7 +361,7 @@ elif [[ -t 0 ]]; then
     provider_signed_in || die "Still not signed in. Run '$BIN' to sign in, then re-run."
     ok "Signed in"
 else
-    local token_hint
+    token_hint=""
     case "$AI_CLI" in
         agy)     token_hint="ANTIGRAVITY_TOKEN" ;;
         copilot) token_hint="COPILOT_GITHUB_TOKEN" ;;

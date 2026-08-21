@@ -252,7 +252,9 @@ while [[ $# -gt 0 ]]; do
         --notes|--extra)       need_val "$1" "${2:-}"; EXTRA="$2";        GAVE_ARGS=1; shift 2 ;;
         --template)            need_val "$1" "${2:-}"; TEMPLATE_FILE="$2"; GAVE_ARGS=1; shift 2 ;;
         --ai-cli)              need_val "$1" "${2:-}"; AI_CLI="$2";        shift 2 ;;
+        --ai-cli=*)            AI_CLI="${1#*=}";                          shift ;;
         --openrouter-model)    need_val "$1" "${2:-}"; OPENROUTER_MODEL="$2"; shift 2 ;;
+        --openrouter-model=*)  OPENROUTER_MODEL="${1#*=}";                shift ;;
         -i|--interactive)      INTERACTIVE=1; shift ;;
         --plan)                PLAN=1; INTERACTIVE=1; shift ;;
         -h|--help)             usage; exit 0 ;;
