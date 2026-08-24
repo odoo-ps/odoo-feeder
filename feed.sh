@@ -235,13 +235,18 @@ ensure_node() {
     warn "node not found — installing..."
     case "$PM" in
         apt)
-            fetch https://deb.nodesource.com/setup_24.x | $SUDO bash - >/dev/null 2>&1
-            $SUDO apt-get install -y nodejs >/dev/null 2>&1 ;;
+            fetch https://deb.nodesource.com/setup_24.x | $SUDO bash - >/dev/null 2>&1 \
+                || die "Could not configure the NodeSource apt repo (sudo needs a password? no network?). Install Node.js 24+ manually and re-run."
+            $SUDO apt-get install -y nodejs >/dev/null 2>&1 \
+                || die "Could not install nodejs via apt. Install Node.js 24+ manually and re-run." ;;
         dnf)
-            fetch https://rpm.nodesource.com/setup_24.x | $SUDO bash - >/dev/null 2>&1
-            $SUDO dnf install -y nodejs >/dev/null 2>&1 ;;
+            fetch https://rpm.nodesource.com/setup_24.x | $SUDO bash - >/dev/null 2>&1 \
+                || die "Could not configure the NodeSource dnf repo (sudo needs a password? no network?). Install Node.js 24+ manually and re-run."
+            $SUDO dnf install -y nodejs >/dev/null 2>&1 \
+                || die "Could not install nodejs via dnf. Install Node.js 24+ manually and re-run." ;;
         brew)
-            brew install node >/dev/null 2>&1 ;;
+            brew install node >/dev/null 2>&1 \
+                || die "Could not install node via brew. Install Node.js 24+ manually and re-run." ;;
     esac
     command -v node >/dev/null 2>&1 || die "Could not install node automatically. Please install Node.js 24+ and re-run."
     ok "node installed"
