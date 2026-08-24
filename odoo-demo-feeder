@@ -7,8 +7,9 @@
 # Antigravity AI agent (agy).
 #
 # By default the agent runs NON-INTERACTIVELY and inside an OS-level sandbox
-# (bubblewrap) so its only real capability is to call the CRUD tool against the
-# target database. Pass -i / --interactive to drive agy interactively instead.
+# (bubblewrap on Linux, Seatbelt/sandbox-exec on macOS) so its only real
+# capability is to call the CRUD tool against the target database. Pass
+# -i / --interactive to drive agy interactively instead.
 #
 set -euo pipefail
 
@@ -16,12 +17,28 @@ set -euo pipefail
 # Configuration
 # --------------------------------------------------------------------------- #
 # Public GitHub repo (owner/repo) holding the demo skills, pulled via `npx skills`.
-# Leave empty to skip the remote skills refresh.
-SKILLS_REPO="odoo-ps/odoo-feeder"
+# Set it empty (SKILLS_REPO= odoo-demo-feeder) to skip the remote refresh and run
+# whatever is already in ~/.agents/skills — the way to try a skill edit unpushed.
+REPO_REF="${REPO_REF:-main}"
+SKILLS_REPO="${SKILLS_REPO-odoo-ps/odoo-feeder#$REPO_REF}"
+
+# The one-line bootstrap that installs every dependency and fetches this tool.
+# Standalone-run error messages point here (there is no separate install.sh).
+BOOTSTRAP="bash <(curl -fsSL https://raw.githubusercontent.com/odoo-ps/odoo-feeder/main/feed.sh)"
 
 CRUD_TOOL="${CRUD_TOOL:-$HOME/.local/share/odoo-demo-feeder/odoo_crud.py}"
-AGY_MODEL="${AGY_MODEL:-gemini-3-pro}"
+# Which AI CLI drives the agent: "agy" (Antigravity, default), "copilot"
+# (GitHub Copilot CLI) or "claude" (Claude Code).
+AI_CLI="${AI_CLI:-agy}"
 AGY_TIMEOUT="${AGY_TIMEOUT:-20m}"   # headless print-mode budget (research+install+imports)
+# OpenRouter BYOK, 'copilot' provider only: set to an OpenRouter model id (e.g.
+# anthropic/claude-sonnet-4.5) to route Copilot through OpenRouter instead of
+# GitHub's own model routing. The API key is never accepted as a flag or
+# plaintext env var — store it once in the OS keyring first:
+#   keyring set odoo-feeder openrouter-api-key
+OPENROUTER_MODEL="${OPENROUTER_MODEL:-}"
+OPENROUTER_KEYRING_SERVICE="odoo-feeder"
+OPENROUTER_KEYRING_ACCOUNT="openrouter-api-key"
 
 INTERACTIVE=0
 PLAN=0
@@ -38,6 +55,12 @@ COMPANY_NAME="${COMPANY_NAME:-}"
 COMPANY_SITE="${COMPANY_SITE:-}"
 EXTRA="${EXTRA:-}"
 ODOO_SIZE="${ODOO_SIZE:-}"   # small | medium | big (dataset volume)
+
+# A sales "template": a free-text block (pasted or loaded from --template FILE)
+# describing the demo to build. It is passed to the AI verbatim — never parsed —
+# so any key the sales person writes is understood by the agent.
+TEMPLATE_FILE="${TEMPLATE_FILE:-}"   # path to a template file (non-interactive load)
+TEMPLATE_TEXT="${TEMPLATE_TEXT:-}"   # raw template contents
 
 # --------------------------------------------------------------------------- #
 # Colors (Odoo brand) — degrade gracefully when no TTY / NO_COLOR
@@ -57,6 +80,72 @@ fi
 info()  { printf '%s\n' "${TEAL}$*${RESET}"; }
 warn()  { printf '%s\n' "${RED}! $*${RESET}" >&2; }
 die()   { printf '%s\n' "${RED}✖ $*${RESET}" >&2; exit 1; }
+
+# --------------------------------------------------------------------------- #
+# UI helpers — use `gum` for a nicer interface when it is available and we have a
+# TTY, and degrade to plain `read` prompts otherwise. Every helper prints its
+# result on stdout (so it can be captured with $(...)) and its UI on stderr, so
+# the two never mix in the captured value.
+# --------------------------------------------------------------------------- #
+HAS_GUM=0
+if command -v gum >/dev/null 2>&1 && [[ -t 0 && -t 2 ]]; then HAS_GUM=1; fi
+export GUM_INPUT_PROMPT_FOREGROUND="#714B67"   # Odoo purple accent
+
+ui_input() {  # ui_input <label> [placeholder]
+    if [[ "$HAS_GUM" -eq 1 ]]; then
+        gum input --prompt "$1 " --placeholder "${2:-}"
+    else
+        local v; read -r -p "  $1${2:+ ($2)}: " v; printf '%s' "$v"
+    fi
+}
+ui_input_value() {  # ui_input_value <label> [value]
+    if [[ "$HAS_GUM" -eq 1 ]]; then
+        gum input --prompt "$1 " --value "${2:-}"
+    else
+        local v; read -r -p "  $1${2:+ ($2)}: " v; printf '%s' "${v:-$2}"
+    fi
+}
+ui_password() {  # ui_password <label>
+    if [[ "$HAS_GUM" -eq 1 ]]; then
+        gum input --password --prompt "$1 "
+    else
+        local v; read -r -s -p "  $1 " v; printf '\n' >&2; printf '%s' "$v"
+    fi
+}
+ui_choose() {  # ui_choose <header> <option>...  -> prints the chosen option
+    local header="$1"; shift
+    if [[ "$HAS_GUM" -eq 1 ]]; then
+        gum choose --header "$header" "$@"
+    else
+        local opt i=1
+        printf '  %s\n' "$header" >&2
+        for opt in "$@"; do printf '    %d) %s\n' "$i" "$opt" >&2; i=$((i+1)); done
+        local n; read -r -p "  Choice [1]: " n; n="${n:-1}"
+        if [[ "$n" =~ ^[0-9]+$ ]] && (( n>=1 && n<=$# )); then
+            printf '%s' "${!n}"
+        else
+            printf '%s' "$1"
+        fi
+    fi
+}
+ui_write() {  # ui_write [placeholder]  -> prints the pasted multi-line text
+    if [[ "$HAS_GUM" -eq 1 ]]; then
+        # In gum ≥0.16, Enter submits and Ctrl+J inserts a newline; a pasted block
+        # keeps its own newlines, so paste then press Enter.
+        gum write --placeholder "${1:-Paste here…}" --width 0 --height 18 \
+                  --header "Paste, then Enter to submit (Ctrl+J for a new line)"
+    else
+        printf '  %s\n' "${1:-Paste your text, then press Ctrl+D when done:}" >&2
+        cat
+    fi
+}
+ui_header() {  # ui_header <text>
+    if [[ "$HAS_GUM" -eq 1 ]]; then
+        gum style --foreground "#714B67" --bold "$*"
+    else
+        info "$*"
+    fi
+}
 
 # Validate an Odoo URL: must be http(s), and never the public odoo.com site.
 # Returns non-zero (and warns) when the URL is not acceptable.
@@ -111,11 +200,33 @@ Content:
   --website URL         Customer website to research     [COMPANY_SITE]
   --notes TEXT          Extra free-text instructions for the AI  [EXTRA]
                         e.g. "also create 5 sales orders and a few invoices"
+  --template FILE       Load a template file describing the demo to build and
+                        pass it to the AI verbatim (see the template block below).
+                        Interactively, you can paste a template instead.
+
+A template is a free-text block the AI reads directly — write any keys you like:
+  name: Maison Rorive demo
+  website: https://www.maisonrorive.be
+  company_name: Maison Rorive
+  country: BE
+  apps: [sale_management, crm, website, helpdesk]
+  data_size: big
+  override_model_size: {product.product: 100, crm.lead: 30}
+  configuration: enable pricelists, multi-currency, default sales team "Retail"
 
 Other:
-  -i, --interactive     Drive the AI agent interactively (advanced).
+  -i, --interactive     Drive the AI agent interactively — launches its TUI
+                        instead of running headless (advanced).
       --plan            Review a plan and approve it before any change is made
                         (implies interactive).
+      --ai-cli NAME     AI CLI to drive the agent: 'agy' (Antigravity, default),
+                        'copilot' (GitHub Copilot CLI) or 'claude' (Claude Code). [AI_CLI]
+      --openrouter-model ID   Route 'copilot' through OpenRouter using this model
+                        id (e.g. anthropic/claude-sonnet-4.5), instead of
+                        GitHub's own model routing. [OPENROUTER_MODEL]
+                        The API key is read from the OS keyring, never from a
+                        flag or plaintext env var — store it once with:
+                          keyring set odoo-feeder openrouter-api-key
   -h, --help            Show this help.
 
 Example:
@@ -140,6 +251,11 @@ while [[ $# -gt 0 ]]; do
         --company)             need_val "$1" "${2:-}"; COMPANY_NAME="$2"; GAVE_ARGS=1; shift 2 ;;
         --website)             need_val "$1" "${2:-}"; COMPANY_SITE="$2"; GAVE_ARGS=1; shift 2 ;;
         --notes|--extra)       need_val "$1" "${2:-}"; EXTRA="$2";        GAVE_ARGS=1; shift 2 ;;
+        --template)            need_val "$1" "${2:-}"; TEMPLATE_FILE="$2"; GAVE_ARGS=1; shift 2 ;;
+        --ai-cli)              need_val "$1" "${2:-}"; AI_CLI="$2";        shift 2 ;;
+        --ai-cli=*)            AI_CLI="${1#*=}";                          shift ;;
+        --openrouter-model)    need_val "$1" "${2:-}"; OPENROUTER_MODEL="$2"; shift 2 ;;
+        --openrouter-model=*)  OPENROUTER_MODEL="${1#*=}";                shift ;;
         -i|--interactive)      INTERACTIVE=1; shift ;;
         --plan)                PLAN=1; INTERACTIVE=1; shift ;;
         -h|--help)             usage; exit 0 ;;
@@ -148,20 +264,246 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --------------------------------------------------------------------------- #
+# AI CLI provider dispatch — agy (Antigravity), copilot (GitHub Copilot CLI)
+# and claude (Claude Code) are implemented; every function below is the seam a
+# future provider plugs into. Unknown providers fail fast, before any sandbox
+# work.
+# --------------------------------------------------------------------------- #
+provider_supported() {
+    case "$AI_CLI" in
+        agy|copilot|claude) ;;
+        *)      die "Unknown --ai-cli '$AI_CLI'. Only 'agy', 'copilot' and 'claude' are supported today." ;;
+    esac
+}
+provider_supported
+provider_bin() {
+    case "$AI_CLI" in
+        agy)     printf 'agy' ;;
+        copilot) printf 'copilot' ;;
+        claude)  printf 'claude' ;;
+    esac
+}
+# `npx skills add --agent <id>` installs into a directory keyed by this id (see
+# `npx skills add --help`'s "Valid agents" list) — it is NOT the same string as
+# provider_bin(). Getting this wrong means the skill lands in some other
+# provider's directory and the one actually running never sees it.
+provider_skill_agent() {
+    case "$AI_CLI" in
+        agy)     printf 'antigravity' ;;
+        copilot) printf 'github-copilot' ;;
+        claude)  printf 'claude-code' ;;
+    esac
+}
+provider_default_model() {
+    case "$AI_CLI" in
+        agy)
+            # agy's model ids change from release to release (renames, retired
+            # tiers), and an unknown id makes it abort immediately ("model ...
+            # is not recognized"), so never hardcode one: ask the installed
+            # build what it actually offers and prefer from there.
+            # Output varies by build: a bare id per line, or 'id<TAB>Display
+            # Name' behind a 'Fetching available models...' status line — take
+            # the first field and keep only lines that look like an id.
+            local models pref
+            models="$(agy models 2>/dev/null | awk '{print $1}' | grep -E '^[a-z0-9.-]+$')"
+            for pref in gemini-3.1-pro-high gemini-3.1-pro-low gemini-3.6-flash-high gemini-3.5-flash-high; do
+                if grep -qxF -- "$pref" <<<"$models"; then printf '%s' "$pref"; return; fi
+            done
+            printf '%s' "$(head -n1 <<<"$models")"   # none of the preferences exist
+            ;;
+        copilot) printf 'auto' ;;   # let Copilot pick a model automatically
+        claude)  printf 'sonnet' ;;
+    esac
+}
+# Only agy persists its allowlist to a settings file; copilot's and claude's
+# permissions are per-invocation flags (see the launcher below), so this is
+# agy-only.
+provider_settings_path() { printf '%s/.gemini/antigravity-cli/settings.json' "$HOME"; }
+provider_log_dir() {
+    case "$AI_CLI" in
+        agy)     printf '%s/.gemini/antigravity-cli/log' "$HOME" ;;
+        copilot) printf '%s/.copilot/logs' "$HOME" ;;
+        claude)  printf '' ;;   # claude surfaces its own errors on stdout/stderr, no separate log to mine
+    esac
+}
+provider_log_glob() {
+    case "$AI_CLI" in
+        agy)     printf 'cli-*.log' ;;
+        copilot) printf 'process-*.log' ;;
+        claude)  printf '' ;;
+    esac
+}
+provider_log_error_pattern() {
+    case "$AI_CLI" in
+        agy)     printf '^E[0-9]{4}' ;;
+        copilot) printf '\[ERROR\]' ;;
+        claude)  printf '' ;;
+    esac
+}
+# Permission rules the agy agent needs: the CRUD wrapper, plus web/file access
+# for the skill (see the settings-merge block in Step 2 below). agy-only.
+#
+# 'command(odoo-crud)' only allows the name; agy's --sandbox mode separately
+# gates any command that needs network/full-disk access (odoo-crud does, for
+# its XML-RPC calls) behind its own "Allow sandbox bypass?" prompt — a prompt
+# headless mode can't answer, and even in --interactive mode it just adds a
+# per-call confirmation the agent has to get through every time. Persisting
+# 'unsandboxed(odoo-crud)' — the exact rule agy itself writes here when a human
+# picks "always allow ... (Persist to settings.json)" — grants that bypass
+# upfront instead of prompting for it.
+provider_permission_allow_rules() { printf '%s\n' "command(odoo-crud)" "unsandboxed(odoo-crud)" "read_url(*)" "read_file(*)" "write_file(*)"; }
+# Without this, a shell command that isn't odoo-crud falls through to agy's
+# default "ask" behaviour instead of being denied outright — a real prompt in
+# --interactive/--plan mode (a model reaching for e.g. 'python3 -c' with
+# BeautifulSoup instead of the skill's own web tools), silently dropped only
+# in headless print mode where nothing can answer it. Deny beats allow on a
+# conflict, so entries here must never name 'odoo-crud' itself.
+#
+# This is a denylist of specific interpreter/shell/network binary names, NOT
+# a real "deny everything except odoo-crud" rule — despite what agy's own
+# docs claim ("command(regex)", and the installed binary does link
+# github.com/dlclark/regexp2), empirically 'command(...)' only matches the
+# first word of the command line by EXACT literal string: 'command(python3)'
+# denies 'python3 -c ...', but 'command(pyth.*)' or a lookahead pattern like
+# '(?!odoo-crud$).*' match nothing at all and silently fall through to the
+# same "ask" prompt this exists to avoid (verified empirically against a
+# live agy session — do not replace this with a regex without re-verifying
+# against a real run, the docs are not a reliable guide here). So this list
+# is inherently incomplete: an agent reaching for a binary not named here
+# still hits the interactive prompt. bwrap remains the real backstop against
+# actual damage from any of these if one is ever allowed through.
+provider_permission_deny_rules() {
+    printf '%s\n' \
+        "command(python3)" "command(python)" "command(python2)" \
+        "command(node)" "command(nodejs)" "command(deno)" "command(bun)" \
+        "command(perl)" "command(ruby)" "command(php)" "command(lua)" \
+        "command(bash)" "command(sh)" "command(zsh)" "command(dash)" "command(ksh)" "command(fish)" \
+        "command(powershell)" "command(pwsh)" \
+        "command(curl)" "command(wget)" "command(nc)" "command(ncat)" "command(socat)" "command(telnet)" "command(ssh)" \
+        "command(npm)" "command(npx)" "command(yarn)" "command(pnpm)" \
+        "command(pip)" "command(pip3)" "command(gem)" "command(osascript)"
+}
+
+AGY_MODEL="${AGY_MODEL:-$(provider_default_model)}"   # kept for backwards compatibility
+AI_MODEL="${AI_MODEL:-$AGY_MODEL}"
+
+# --------------------------------------------------------------------------- #
+# OpenRouter BYOK (copilot only) — see `copilot help providers`. GitHub
+# Copilot CLI activates "bring your own key" mode purely via env vars, so this
+# just resolves the API key from the OS keyring and exports the right ones;
+# no GitHub sign-in is needed once this is active.
+# --------------------------------------------------------------------------- #
+if [[ -n "$OPENROUTER_MODEL" ]]; then
+    [[ "$AI_CLI" == "copilot" ]] \
+        || die "--openrouter-model / OPENROUTER_MODEL only applies to --ai-cli copilot."
+    command -v keyring >/dev/null 2>&1 \
+        || die "The 'keyring' CLI is required to read the OpenRouter API key (pip install keyring), then:
+   keyring set $OPENROUTER_KEYRING_SERVICE $OPENROUTER_KEYRING_ACCOUNT"
+    OPENROUTER_API_KEY="$(keyring get "$OPENROUTER_KEYRING_SERVICE" "$OPENROUTER_KEYRING_ACCOUNT" 2>/dev/null)" \
+        || die "No OpenRouter API key found in the OS keyring. Store it once with:
+   keyring set $OPENROUTER_KEYRING_SERVICE $OPENROUTER_KEYRING_ACCOUNT"
+    [[ -n "$OPENROUTER_API_KEY" ]] || die "The OpenRouter API key stored in the keyring is empty."
+    export COPILOT_PROVIDER_BASE_URL="https://openrouter.ai/api/v1"
+    export COPILOT_PROVIDER_TYPE="openai"
+    export COPILOT_PROVIDER_API_KEY="$OPENROUTER_API_KEY"
+    export COPILOT_MODEL="$OPENROUTER_MODEL"
+    AI_MODEL="$OPENROUTER_MODEL"   # keep the explicit --model flag in sync with BYOK
+fi
+
+# --------------------------------------------------------------------------- #
 # Pre-flight checks
 # --------------------------------------------------------------------------- #
-command -v agy   >/dev/null 2>&1 || die "agy (Antigravity CLI) is not installed. Run install.sh first."
-command -v bwrap >/dev/null 2>&1 || die "bubblewrap (bwrap) is not installed. Run install.sh first."
-command -v python3 >/dev/null 2>&1 || die "python3 is not installed. Run install.sh first."
-[[ -f "$CRUD_TOOL" ]] || die "CRUD tool not found at $CRUD_TOOL. Run install.sh first."
+AI_BIN="$(provider_bin)"
+command -v "$AI_BIN" >/dev/null 2>&1 || die "$AI_BIN is not installed.
+   Run the one-line bootstrap first: $BOOTSTRAP"
+# OS-level sandbox: bubblewrap on Linux, Seatbelt (sandbox-exec) on macOS.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    command -v sandbox-exec >/dev/null 2>&1 || die "sandbox-exec (macOS Seatbelt) not found — cannot sandbox the agent."
+else
+    command -v bwrap >/dev/null 2>&1 || die "bubblewrap (bwrap) is not installed.
+   Run the one-line bootstrap first: $BOOTSTRAP"
+    # Installed is not the same as usable. Ubuntu 23.10+ blocks unprivileged
+    # user namespaces through AppArmor, so bwrap is on PATH and still cannot
+    # jail anything — and checking only for the binary meant finding that out
+    # after the research, the installs and the imports, at the moment the agent
+    # was due to start.
+    bwrap --dev-bind / / --unshare-pid true >/dev/null 2>&1 || die "bwrap is installed but cannot create a sandbox.
+   On Ubuntu 23.10+ this is the unprivileged user-namespace restriction
+   (kernel.apparmor_restrict_unprivileged_userns=1). Load Ubuntu's profile:
+     sudo apt install apparmor-profiles
+     sudo ln -s /usr/share/apparmor/extra-profiles/bwrap-userns-restrict /etc/apparmor.d/
+     sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict"
+fi
+command -v python3 >/dev/null 2>&1 || die "python3 is not installed.
+   Run the one-line bootstrap first: $BOOTSTRAP"
+[[ -f "$CRUD_TOOL" ]] || die "CRUD tool not found at $CRUD_TOOL.
+   Run the one-line bootstrap first: $BOOTSTRAP"
 
-# agy must already be signed in: its Google OAuth flow (browser + paste a code)
+# The AI CLI must already be signed in: its OAuth flow (browser + paste a code)
 # cannot run headless inside the sandbox, so an unauthenticated run would just
 # hang until the timeout. Fail fast with clear instructions instead.
-if [[ -z "${ANTIGRAVITY_TOKEN:-}" && ! -s "$HOME/.gemini/oauth_creds.json" ]]; then
-    die "agy is not signed in yet.
-   Run 'agy' once and sign in with your Google account, then re-run.
-   (For unattended / CI use, set the ANTIGRAVITY_TOKEN environment variable.)"
+#
+# Neither agy (OS keyring) nor copilot reliably expose sign-in via a file to
+# stat (agy's oauth_creds.json check gave false negatives on a fresh machine),
+# so both are probed with a real bounded headless call. claude has an actual
+# documented status command (`claude auth status`, exit 0 = signed in), so use
+# that directly. Skip the probe with ASSUME_SIGNED_IN=1 (set automatically when
+# launched via feed.sh, which already checked) or a provider token
+# (ANTIGRAVITY_TOKEN / COPILOT_GITHUB_TOKEN / GH_TOKEN / GITHUB_TOKEN /
+# ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN) for unattended runs.
+provider_signed_in() {
+    [[ -n "${ASSUME_SIGNED_IN:-}" ]] && return 0
+    case "$AI_CLI" in
+        agy)
+            [[ -n "${ANTIGRAVITY_TOKEN:-}" ]] && return 0
+            # Output varies by build: a bare id per line, or 'id<TAB>Display
+            # Name' behind a 'Fetching available models...' status line — take
+            # the first field and keep only lines that look like an id, or the
+            # status line itself gets used as a "model" and the ping below
+            # fails on a bogus name, misreporting a signed-in session as not.
+            local m; m="$("$AI_BIN" models 2>/dev/null | awk '{print $1}' | grep -E '^[a-z0-9.-]+$' | head -n1)"
+            [[ -n "$m" ]] || return 1
+            if command -v timeout >/dev/null 2>&1; then
+                timeout 30 "$AI_BIN" -p ping --model "$m" --print-timeout 25s >/dev/null 2>&1
+            else
+                "$AI_BIN" -p ping --model "$m" --print-timeout 25s >/dev/null 2>&1
+            fi
+            ;;
+        copilot)
+            [[ -n "${COPILOT_PROVIDER_BASE_URL:-}" ]] && return 0   # BYOK (e.g. OpenRouter) — no GitHub auth needed
+            [[ -n "${COPILOT_GITHUB_TOKEN:-}" || -n "${GH_TOKEN:-}" || -n "${GITHUB_TOKEN:-}" ]] && return 0
+            if command -v timeout >/dev/null 2>&1; then
+                timeout 30 "$AI_BIN" -p ping --allow-all-tools -s --model "$(provider_default_model)" >/dev/null 2>&1
+            else
+                "$AI_BIN" -p ping --allow-all-tools -s --model "$(provider_default_model)" >/dev/null 2>&1
+            fi
+            ;;
+        claude)
+            [[ -n "${ANTHROPIC_API_KEY:-}" || -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && return 0
+            "$AI_BIN" auth status >/dev/null 2>&1
+            ;;
+    esac
+}
+if ! provider_signed_in; then
+    local token_hint
+    case "$AI_CLI" in
+        agy)
+            SIGN_IN_HINT="Run '$AI_BIN' once and sign in with your Google account"
+            token_hint="ANTIGRAVITY_TOKEN"
+            ;;
+        copilot)
+            SIGN_IN_HINT="Run '$AI_BIN login' to sign in"
+            token_hint="COPILOT_GITHUB_TOKEN (or GH_TOKEN/GITHUB_TOKEN)"
+            ;;
+        claude)
+            SIGN_IN_HINT="Run '$AI_BIN auth login' to sign in"
+            token_hint="ANTHROPIC_API_KEY (or CLAUDE_CODE_OAUTH_TOKEN)"
+            ;;
+    esac
+    die "$AI_BIN does not seem to be signed in.
+   $SIGN_IN_HINT, then re-run.
+   (For unattended / CI use, set $token_hint; to skip this check, set
+   ASSUME_SIGNED_IN=1.)"
 fi
 
 print_logo
@@ -169,13 +511,13 @@ print_logo
 # --------------------------------------------------------------------------- #
 # Step 1 — collect connection details
 # --------------------------------------------------------------------------- #
-info "Step 1/3 — Tell me about the database you want to fill."
+ui_header "Step 1/3 — Tell me about the database you want to fill."
 echo
 
 # URL — prompt (with a retry loop) only if not supplied; always validate.
 if [[ -z "$ODOO_URL" ]]; then
     while :; do
-        read -r -p "  Odoo URL (e.g. https://mycompany.odoo.com): " ODOO_URL
+        ODOO_URL="$(ui_input "Odoo URL" "e.g. https://mycompany.odoo.com")"
         ODOO_URL="${ODOO_URL%/}"
         check_url "$ODOO_URL" && break
         ODOO_URL=""
@@ -185,47 +527,146 @@ else
     check_url "$ODOO_URL" || die "Refusing to use this URL."
 fi
 
-[[ -n "$ODOO_LOGIN" ]]  || read -r -p "  Login (email or user): " ODOO_LOGIN
+[[ -n "$ODOO_LOGIN" ]]  || ODOO_LOGIN="$(ui_input "Login (email or user)")"
 [[ -n "$ODOO_LOGIN" ]]  || die "A login is required."
 
-[[ -n "$ODOO_SECRET" ]] || { read -r -s -p "  API key or password: " ODOO_SECRET; echo; }
+[[ -n "$ODOO_SECRET" ]] || ODOO_SECRET="$(ui_password "API key or password")"
 [[ -n "$ODOO_SECRET" ]] || die "An API key or password is required."
 
-[[ -n "$ODOO_SCOPE" ]]  || read -r -p "  Scope / industry (e.g. Plumbing, Commerce, Restaurant): " ODOO_SCOPE
-[[ -n "$ODOO_SCOPE" ]]  || die "A scope is required."
+# Verify credentials and database name, and ask again if it fails.
+while :; do
+    info "  Verifying connection to Odoo..."
+    set +e
+    AUTH_OUT=$(ODOO_URL="$ODOO_URL" ODOO_LOGIN="$ODOO_LOGIN" ODOO_SECRET="$ODOO_SECRET" ODOO_DB="$ODOO_DB" python3 "$CRUD_TOOL" auth-check 2>&1)
+    AUTH_STATUS=$?
+    set -e
 
-# Optional fields — only asked when running fully interactively (no flags given).
-# The database name matters for localhost / self-hosted (SaaS auto-detects it).
-# A company + website let the AI research real data via the 'odoo-demo-csv' skill.
-if [[ "$GAVE_ARGS" -eq 0 ]]; then
-    [[ -n "$ODOO_DB" ]]      || read -r -p "  Database name (optional, needed for localhost; Enter to auto-detect): " ODOO_DB
-    [[ -n "$ODOO_SIZE" ]]    || read -r -p "  Dataset size — small / medium / big [medium]: " ODOO_SIZE
-    [[ -n "$COMPANY_NAME" ]] || read -r -p "  Customer company name (optional, Enter to skip): " COMPANY_NAME
-    [[ -n "$COMPANY_SITE" ]] || read -r -p "  Customer website to research (optional, e.g. https://acme.com): " COMPANY_SITE
-    if [[ -z "$EXTRA" ]]; then
-        echo "  Anything else the AI should do? (optional — type one or more lines,"
-        echo "  e.g. 'also create 5 sales orders'; press Enter on an empty line to finish)"
-        while IFS= read -r -p "  > " _line && [[ -n "$_line" ]]; do
-            EXTRA+="$_line"$'\n'
+    if [[ $AUTH_STATUS -eq 0 ]]; then
+        # Parse returned database name from JSON if we auto-detected it
+        DETECTED_DB=$(printf '%s' "$AUTH_OUT" | python3 -c "import sys, json; print(json.load(sys.stdin).get('result', {}).get('database', ''))" 2>/dev/null || true)
+        if [[ -n "$DETECTED_DB" && -z "$ODOO_DB" ]]; then
+            ODOO_DB="$DETECTED_DB"
+        fi
+        info "  ✔ Connection successful (Odoo version $(printf '%s' "$AUTH_OUT" | python3 -c "import sys, json; print(json.load(sys.stdin).get('result', {}).get('version', {}).get('server_version', 'unknown'))" 2>/dev/null || true), Database: $ODOO_DB)"
+
+        # Done here, in the launcher itself — never delegated to the agent's
+        # prompt — so a run can never skip it by having a weaker model forget,
+        # or a template that never mentions it. See odoo_crud.py's
+        # disable-outgoing-mail for what it actually does.
+        set +e
+        MAIL_OUT=$(ODOO_URL="$ODOO_URL" ODOO_LOGIN="$ODOO_LOGIN" ODOO_SECRET="$ODOO_SECRET" ODOO_DB="$ODOO_DB" python3 "$CRUD_TOOL" disable-outgoing-mail 2>&1)
+        MAIL_STATUS=$?
+        set -e
+        if [[ $MAIL_STATUS -eq 0 ]]; then
+            info "  ✔ Outgoing mail disabled for this run (no real email will be sent)"
+        else
+            warn "Could not disable outgoing mail on this database: $MAIL_OUT"
+            warn "  → Proceeding anyway, but this demo database may send real email."
+        fi
+        break
+    else
+        err_msg=$(printf '%s' "$AUTH_OUT" | python3 -c "import sys, json; print(json.load(sys.stdin).get('error', ''))" 2>/dev/null || true)
+        [[ -n "$err_msg" ]] || err_msg="$AUTH_OUT"
+        warn "Connection failed: $err_msg"
+
+        # If we cannot read input (non-interactive or not a TTY), die immediately
+        if [[ ! -t 0 ]]; then
+            die "Connection check failed and cannot prompt in non-interactive terminal."
+        fi
+
+        echo
+        info "Please re-enter your credentials."
+        new_url=""
+        while :; do
+            new_url="$(ui_input_value "Odoo URL" "$ODOO_URL")"
+            new_url="${new_url%/}"
+            if [[ -z "$new_url" ]]; then
+                break
+            fi
+            if check_url "$new_url"; then
+                ODOO_URL="$new_url"
+                break
+            fi
         done
+        local prev_login="$ODOO_LOGIN"
+        ODOO_LOGIN=""
+        ODOO_SECRET=""
+        while [[ -z "$ODOO_LOGIN" ]]; do
+            ODOO_LOGIN="$(ui_input_value "Login (email or user)" "$prev_login")"
+            [[ -n "$ODOO_LOGIN" ]] || warn "A login is required."
+        done
+        while [[ -z "$ODOO_SECRET" ]]; do
+            ODOO_SECRET="$(ui_password "API key or password")"
+            [[ -n "$ODOO_SECRET" ]] || warn "An API key or password is required."
+        done
+        ODOO_DB="$(ui_input_value "Database name" "$ODOO_DB")"
+    fi
+done
+
+# A --template FILE takes precedence: load it verbatim, no content prompts.
+if [[ -n "$TEMPLATE_FILE" ]]; then
+    [[ -f "$TEMPLATE_FILE" ]] || die "Template file not found: $TEMPLATE_FILE"
+    TEMPLATE_TEXT="$(cat "$TEMPLATE_FILE")"
+    [[ -n "$TEMPLATE_TEXT" ]] || die "Template file is empty: $TEMPLATE_FILE"
+fi
+
+# --------------------------------------------------------------------------- #
+# Content — how the demo should be built. Two ways in:
+#   • Template : paste (or --template FILE) a free-text block; it goes to the AI
+#                verbatim, so any key the sales person writes is understood.
+#   • Scratch  : answer a few questions (scope, size, company, website, notes).
+# The template chooser only appears when running interactively (no flags given).
+# --------------------------------------------------------------------------- #
+if [[ -z "$TEMPLATE_TEXT" && "$GAVE_ARGS" -eq 0 ]]; then
+    echo
+    choice="$(ui_choose "Do you want to use a template or start from scratch?" \
+        "Paste a template" "Start from scratch")"
+    if [[ "$choice" == "Paste a template" ]]; then
+        echo
+        info "  Paste your template below. Example keys:"
+        printf '%s\n' "${DIM}    name / website / company_name / country / apps / data_size /
+    override_model_size / configuration — plus any free text.${RESET}"
+        TEMPLATE_TEXT="$(ui_write "Paste your template here…")"
+        [[ -n "$(printf '%s' "$TEMPLATE_TEXT" | tr -d '[:space:]')" ]] || die "The template was empty."
     fi
 fi
 
-# Normalise the dataset size (default medium; fall back on anything unexpected).
-ODOO_SIZE="$(printf '%s' "${ODOO_SIZE:-medium}" | tr '[:upper:]' '[:lower:]')"
-case "$ODOO_SIZE" in
-    small|medium|big) ;;
-    *) warn "Unknown size '$ODOO_SIZE' — using 'medium'."; ODOO_SIZE="medium" ;;
-esac
+# Scratch / flag-driven content: gather the individual fields. Skipped entirely
+# when a template was provided (the template already describes the demo).
+if [[ -z "$TEMPLATE_TEXT" ]]; then
+    [[ -n "$ODOO_SCOPE" ]] || ODOO_SCOPE="$(ui_input "Scope / industry" "e.g. Plumbing, Commerce, Restaurant")"
+    [[ -n "$ODOO_SCOPE" ]] || die "A scope is required (or use a template)."
+
+    # Optional fields — only asked when running fully interactively (no flags).
+    # The database name matters for localhost / self-hosted (SaaS auto-detects it).
+    if [[ "$GAVE_ARGS" -eq 0 ]]; then
+        [[ -n "$ODOO_DB" ]]      || ODOO_DB="$(ui_input "Database name" "optional — needed for localhost, Enter to auto-detect")"
+        [[ -n "$ODOO_SIZE" ]]    || ODOO_SIZE="$(ui_choose "Dataset size" small medium big)"
+        [[ -n "$COMPANY_NAME" ]] || COMPANY_NAME="$(ui_input "Customer company name" "optional, Enter to skip")"
+        [[ -n "$COMPANY_SITE" ]] || COMPANY_SITE="$(ui_input "Customer website" "optional, e.g. https://acme.com")"
+        [[ -n "$EXTRA" ]]        || EXTRA="$(ui_input "Anything else the AI should do?" "optional, e.g. also create 5 sales orders")"
+    fi
+
+    # Normalise the dataset size (default medium; fall back on anything unexpected).
+    ODOO_SIZE="$(printf '%s' "${ODOO_SIZE:-medium}" | tr '[:upper:]' '[:lower:]')"
+    case "$ODOO_SIZE" in
+        small|medium|big) ;;
+        *) warn "Unknown size '$ODOO_SIZE' — using 'medium'."; ODOO_SIZE="medium" ;;
+    esac
+fi
 
 echo
 info "  → Target  : $ODOO_URL"
 [[ -n "$ODOO_DB" ]]      && info "  → Database: $ODOO_DB"
-info "  → Scope   : $ODOO_SCOPE"
-info "  → Size    : $ODOO_SIZE"
-[[ -n "$COMPANY_NAME" ]] && info "  → Company : $COMPANY_NAME"
-[[ -n "$COMPANY_SITE" ]] && info "  → Website : $COMPANY_SITE"
-[[ -n "$EXTRA" ]]        && info "  → Notes   : $(printf '%s' "$EXTRA" | tr '\n' ' ')"
+if [[ -n "$TEMPLATE_TEXT" ]]; then
+    info "  → Source  : template ($(printf '%s' "$TEMPLATE_TEXT" | grep -c . ) non-empty lines)"
+else
+    info "  → Scope   : $ODOO_SCOPE"
+    info "  → Size    : $ODOO_SIZE"
+    [[ -n "$COMPANY_NAME" ]] && info "  → Company : $COMPANY_NAME"
+    [[ -n "$COMPANY_SITE" ]] && info "  → Website : $COMPANY_SITE"
+    [[ -n "$EXTRA" ]]        && info "  → Notes   : $(printf '%s' "$EXTRA" | tr '\n' ' ')"
+fi
 echo
 
 export ODOO_URL ODOO_LOGIN ODOO_SECRET ODOO_DB ODOO_SCOPE ODOO_SIZE COMPANY_NAME COMPANY_SITE
@@ -233,40 +674,73 @@ export ODOO_URL ODOO_LOGIN ODOO_SECRET ODOO_DB ODOO_SCOPE ODOO_SIZE COMPANY_NAME
 # --------------------------------------------------------------------------- #
 # Step 2 — make sure the skills are up to date
 # --------------------------------------------------------------------------- #
-info "Step 2/3 — Updating the AI skills..."
+ui_header "Step 2/3 — Updating the AI skills..."
 
 # Refresh from the public repo, quietly (npx skills is very chatty), targeting
-# Antigravity only and copying files (symlinks would break inside the sandbox).
+# whichever AI CLI is actually driving this run and copying files (symlinks
+# would break inside the sandbox). `--agent` must be the CLI's OWN id in the
+# skills tool's registry (see provider_skill_agent) — installing under the
+# wrong agent id silently leaves this run's provider with no skill at all.
+SKILL_AGENT="$(provider_skill_agent)"
 if [[ -n "$SKILLS_REPO" ]] && command -v npx >/dev/null 2>&1; then
-    if npx -y skills add "$SKILLS_REPO" --global --agent antigravity --skill '*' --copy -y >/dev/null 2>&1; then
+    if npx -y skills add "$SKILLS_REPO" --global --agent "$SKILL_AGENT" --skill '*' --copy -y >/dev/null 2>&1; then
         info "  ✔ Skills up to date ($SKILLS_REPO)"
     else
         warn "Could not refresh skills from $SKILLS_REPO — using the installed copy."
     fi
 fi
 
+# `npx skills add` only ever places SKILL.md itself — sibling reference files
+# (ODOO-TRAPS.md) are not part of its sync, so fetch it separately into every
+# location the skill got installed to, keeping it beside SKILL.md.
+SKILL_RAW="https://raw.githubusercontent.com/${SKILLS_REPO:-odoo-ps/odoo-feeder}/main/odoo-demo-csv/ODOO-TRAPS.md"
+for skill_dir in "$HOME/.agents/skills/odoo-demo-csv" "$HOME/.claude/skills/odoo-demo-csv"; do
+    if [[ -d "$skill_dir" ]]; then
+        curl -fsSL "$SKILL_RAW" -o "$skill_dir/ODOO-TRAPS.md" 2>/dev/null \
+            || wget -qO "$skill_dir/ODOO-TRAPS.md" "$SKILL_RAW" 2>/dev/null || true
+    fi
+done
+
 # --- Restrict the agent to ONLY the CRUD tool ------------------------------- #
 # Install a single-name wrapper so the permission rule matches it exactly (a
-# rule on 'python3' would auto-approve any Python). Then allow only that command
-# in agy's settings — plus web research and file access the skill needs. Every
-# other command falls outside the allowlist and is not auto-approved. bwrap
-# remains the hard OS backstop underneath.
+# rule on 'python3' would auto-approve any Python). Every other command falls
+# outside the allowlist and is not auto-approved. bwrap remains the hard OS
+# backstop underneath. Shared across providers — both need the exact-name
+# wrapper, whichever way each one is told to trust it.
 CRUD_WRAPPER="$HOME/.local/bin/odoo-crud"
 mkdir -p "$HOME/.local/bin"
 cat > "$CRUD_WRAPPER" <<CRUD
 #!/usr/bin/env bash
-exec python3 "$CRUD_TOOL" "\$@"
+# Record every real invocation AND its exit code, independently of anything
+# the model later claims in its own summary — a failed call (e.g. a rejected
+# import-csv) is not proof of a write, so the audit check after the run in
+# Step 3 needs the outcome, not just that the command was attempted.
+python3 "$CRUD_TOOL" "\$@"
+status=\$?
+[[ -n "\${ODOO_CRUD_AUDIT_LOG:-}" ]] && printf '%s %s exit=%s\n' "\$(date -u +%FT%TZ)" "\$*" "\$status" >> "\$ODOO_CRUD_AUDIT_LOG" 2>/dev/null
+exit "\$status"
 CRUD
 chmod +x "$CRUD_WRAPPER"
 
-# Merge our allow-rules into agy's global settings (preserving anything already
-# there). Strict, non-regex matching (agy default) — 'command(odoo-crud)' matches
-# any 'odoo-crud <subcommand>' invocation.
-AGY_SETTINGS="$HOME/.gemini/antigravity-cli/settings.json"
-mkdir -p "$(dirname "$AGY_SETTINGS")"
-if python3 - "$AGY_SETTINGS" <<'PY'
+case "$AI_CLI" in
+agy)
+    # Merge our allow- and deny-rules into agy's global settings (preserving
+    # anything already there). 'command(odoo-crud)' matches any
+    # 'odoo-crud <subcommand>' invocation; the deny rule is what stops every
+    # other shell command from falling through to a prompt (see
+    # provider_permission_deny_rules).
+    AI_SETTINGS="$(provider_settings_path)"
+    mkdir -p "$(dirname "$AI_SETTINGS")"
+    ALLOW_RULES=()
+    while IFS= read -r rule; do ALLOW_RULES+=("$rule"); done < <(provider_permission_allow_rules)
+    DENY_RULES=()
+    while IFS= read -r rule; do DENY_RULES+=("$rule"); done < <(provider_permission_deny_rules)
+    if python3 - "$AI_SETTINGS" "${#ALLOW_RULES[@]}" "${ALLOW_RULES[@]}" "${DENY_RULES[@]}" <<'PY'
 import json, sys
 path = sys.argv[1]
+n_allow = int(sys.argv[2])
+rest = sys.argv[3:]
+allow_rules, deny_rules = rest[:n_allow], rest[n_allow:]
 try:
     with open(path) as f:
         data = json.load(f)
@@ -274,81 +748,102 @@ try:
         data = {}
 except Exception:
     data = {}
-allow = data.setdefault("permissions", {}).setdefault("allow", [])
-for rule in ("command(odoo-crud)", "read_url(*)", "read_file(*)", "write_file(*)"):
+permissions = data.setdefault("permissions", {})
+allow = permissions.setdefault("allow", [])
+for rule in allow_rules:
     if rule not in allow:
         allow.append(rule)
+deny = permissions.setdefault("deny", [])
+for rule in deny_rules:
+    if rule not in deny:
+        deny.append(rule)
 with open(path, "w") as f:
     json.dump(data, f, indent=2)
 PY
-then
-    info "  ✔ Agent restricted to the 'odoo-crud' tool"
-else
-    warn "Could not write agy permissions; the run may prompt for approvals."
-fi
+    then
+        info "  ✔ Agent restricted to the 'odoo-crud' tool"
+    else
+        warn "Could not write $AI_BIN permissions; the run may prompt for approvals."
+    fi
+    ;;
+copilot|claude)
+    # Neither takes a persistent allowlist file — tool restriction is applied
+    # per-invocation (--allow-tool for copilot, --allowed-tools/--disallowed-tools
+    # for claude) in the launcher below.
+    info "  ✔ Agent will be restricted to the 'odoo-crud' tool at launch"
+    ;;
+esac
 echo
 
 # --------------------------------------------------------------------------- #
 # Step 3 — run the AI agent
 # --------------------------------------------------------------------------- #
-info "Step 3/3 — Populating the database. This can take a few minutes..."
+ui_header "Step 3/3 — Populating the database. This can take a few minutes..."
 echo
 
-# Describe the customer to research, if the sales person provided one.
-if [[ -n "$COMPANY_SITE" || -n "$COMPANY_NAME" ]]; then
+# Build the "what to build" section. Two shapes:
+#   • Template mode : pass the pasted block VERBATIM with a legend telling the
+#     agent how to read each key. The template drives size, apps, etc., so we do
+#     NOT inject the hardcoded size line or a fixed module list here.
+#   • Scratch mode  : the classic scope/size/company description.
+if [[ -n "$TEMPLATE_TEXT" ]]; then
+    TARGET_DESC="The sales person provided the TEMPLATE below describing the demo to build.
+Treat it as the source of truth and follow every key you recognise:
+  • name                 → a human label for the demo (not data to create)
+  • website / company_name → the real company to research (research the site FIRST)
+  • country              → set this country (and its currency) on res.company
+  • apps                 → install EXACTLY these apps (map friendly names to the
+                           technical module names, pull in dependencies) in ONE
+                           'install-modules' call
+  • data_size            → the overall scale (small/medium/big); apply it
+                           consistently to every model via the skill's anchor +
+                           ratios. If absent, use 'medium'.
+  • override_model_size  → for the models listed here, use EXACTLY these record
+                           counts instead of the ratio-derived numbers
+  • configuration        → apply these settings/config after the data is imported
+Any other key or free text: follow it as an instruction.
+
+===== TEMPLATE =====
+${TEMPLATE_TEXT}
+===== END TEMPLATE ====="
+    SIZE_DIRECTIVE=""
+elif [[ -n "$COMPANY_SITE" || -n "$COMPANY_NAME" ]]; then
     TARGET_DESC="Build the data for this real company (research its website first):
   Company: ${COMPANY_NAME:-(name not given)}
   Website: ${COMPANY_SITE:-(website not given)}
   Industry / scope: ${ODOO_SCOPE}"
+    SIZE_DIRECTIVE="Target dataset size: ${ODOO_SIZE} — turn it into per-model counts with the
+anchor + ratios in the skill's 'Dataset size' section.
+
+"
 else
     TARGET_DESC="No specific customer was given — generate coherent, generic demo
 data for the \"${ODOO_SCOPE}\" industry."
+    SIZE_DIRECTIVE="Target dataset size: ${ODOO_SIZE} — turn it into per-model counts with the
+anchor + ratios in the skill's 'Dataset size' section.
+
+"
 fi
 
 REQUEST="You are populating an Odoo demo database for a sales demo.
 
-Follow the 'odoo-demo-csv' skill: research the target, generate Odoo-import-ready
-CSV files, and import them into the connected database.
+Follow the 'odoo-demo-csv' skill end to end — it defines the whole run and how to
+narrate it.
 
-Target dataset size: ${ODOO_SIZE}. Apply this size consistently to EVERY model you
-populate, using the anchor + ratios in the skill's 'Dataset size' section — do not
-guess the volume, and don't leave some models tiny while others are large.
+${SIZE_DIRECTIVE}${TARGET_DESC}
 
-${TARGET_DESC}
-
-Use ONLY this tool for every database operation (it reads the credentials from
-environment variables, so never ask for them). Wherever the skill mentions
-CRUD_TOOL, run:
+Wherever the skill says 'odoo-crud', run:
 
     odoo-crud <command> [options]
 
-This is the ONLY shell command you are permitted to run — other commands are
-blocked. It can read and write files in the current directory and fetch web
-pages for research.
+This is the ONLY shell command you are permitted to run — everything else is
+blocked. It reads the database credentials from environment variables, so never
+ask for them, and 'odoo-crud <command> --help' documents every command and flag.
+Write your CSV files in the current directory.
 
-Available commands: auth-check | search-read | create | write | unlink | call |
-models | fields | import-preview | import-csv. Each prints JSON
-{\"ok\": true|false, ...} so you can check results and recover from errors.
-
-Be verbose: announce each step before doing it and print a one-line result after
-each command, so the person watching sees clear progress.
-
-Every command is synchronous — never wait or pause for an operation to finish.
-To install modules, use ONE call: 'odoo-crud install-modules <names...>' — it
-installs AND confirms the modules before returning, so there is nothing to wait
-for. Work in one continuous pass and only stop after you print the SUMMARY line.
-
-Steps:
-1. Run auth-check first and stop with a clear message if it fails.
-2. Inspect the database ('models', 'fields'), then install every module you need
-   in ONE call: 'install-modules crm stock sale_management account' (it installs
-   and confirms before returning — do not wait). Configure the company's
-   country/currency from your research.
-3. Generate the CSV files defined by the skill, write each to a file in the
-   current directory, and import them in dependency order with 'import-csv'.
-4. If an import fails, use 'import-preview', 'fields' and 'models' to find out
-   why, fix the CSV, and retry.
-Finish by printing one line that starts with 'SUMMARY:' describing what you created."
+Finish by printing one line, in plain text with no markdown formatting (no
+bullets, bold, or headers), that starts with exactly 'SUMMARY:' describing what
+you created."
 
 # Append any extra free-text instructions from the sales person.
 if [[ -n "$EXTRA" ]]; then
@@ -360,9 +855,10 @@ fi
 
 # Plan mode: make the agent lay out a plan and wait for approval before acting.
 if [[ "$PLAN" -eq 1 ]]; then
+    if [[ -n "$TEMPLATE_TEXT" ]]; then PLAN_SIZE="the template's data_size"; else PLAN_SIZE="'${ODOO_SIZE}'"; fi
     REQUEST="FIRST, present a short PLAN and WAIT for my approval before you change
 anything. The plan must list: the modules you will install, the record counts per
-model for the '${ODOO_SIZE}' size, and the files you will create. Do NOT run any
+model for ${PLAN_SIZE}, and the files you will create. Do NOT run any
 create/import/install until I reply to approve.
 
 ${REQUEST}"
@@ -376,36 +872,221 @@ trap 'rm -rf "$WORK"' EXIT
 # never lands in the process list. Credentials stay in the environment only.
 printf '%s\n' "$REQUEST" > "$WORK/request.txt"
 
-# agy needs a writable config/auth dir; make sure it exists so the bind succeeds.
-mkdir -p "$HOME/.gemini" "$HOME/.cache"
+# The AI CLI needs a writable config/auth dir; make sure it exists so the bind
+# succeeds (agy: ~/.gemini, copilot: ~/.copilot, claude: ~/.claude — creating
+# all of them is harmless).
+mkdir -p "$HOME/.gemini" "$HOME/.copilot" "$HOME/.claude" "$HOME/.cache" "$HOME/.ssh"
+chmod 700 "$HOME/.ssh"
 
-# Make the skill visible to agy as a WORKSPACE skill (.agents/skills under the
-# working dir). This is the unambiguous location agy reads, regardless of which
-# global dir the skills CLI used. $WORK is the agent's --chdir root.
-mkdir -p "$WORK/.agents/skills"
-for src in "$HOME/.agents/skills" "$HOME/.gemini/antigravity/skills"; do
-    [[ -d "$src" ]] && cp -r "$src/." "$WORK/.agents/skills/" 2>/dev/null || true
+# agy asks "Do you trust the contents of this project?" the first time it sees
+# a workspace path, and $WORK is a fresh mktemp dir every run — so this would
+# fire on every single run. In print mode it is silently bypassed (nothing can
+# answer a headless prompt), but in --interactive mode it genuinely blocks on a
+# keypress agy is never sent, which looks exactly like an empty, stuck prompt.
+# Pre-register $WORK as trusted the same way trust is normally earned (answer
+# once, agy remembers the path in this file) so it never has to ask.
+if [[ "$AI_CLI" == "agy" ]]; then
+    AI_SETTINGS="$(provider_settings_path)"
+    mkdir -p "$(dirname "$AI_SETTINGS")"
+    python3 - "$AI_SETTINGS" "$WORK" <<'PY' || true
+import json, sys
+path, work = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        data = {}
+except Exception:
+    data = {}
+trusted = data.setdefault("trustedWorkspaces", [])
+if work not in trusted:
+    trusted.append(work)
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+PY
+fi
+
+# claude has the exact same first-time-per-directory trust dialog ("Do you
+# trust the files in this folder?"), keyed by the absolute cwd in ~/.claude.json
+# (projects["<path>"].hasTrustDialogAccepted). Headless -p mode has nowhere to
+# answer it, so an unanswered dialog can surface as the run looking stuck or
+# unauthenticated on a directory that is, in fact, a fresh mktemp path every
+# single time. Pre-accept it for $WORK the same way a human answering once
+# would, mirroring the agy block above.
+if [[ "$AI_CLI" == "claude" ]]; then
+    CLAUDE_CONFIG="$HOME/.claude.json"
+    python3 - "$CLAUDE_CONFIG" "$WORK" <<'PY' || true
+import json, sys
+path, work = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        data = {}
+except Exception:
+    data = {}
+projects = data.setdefault("projects", {})
+proj = projects.setdefault(work, {})
+proj["hasTrustDialogAccepted"] = True
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+PY
+fi
+
+# Make the skill visible as a WORKSPACE skill (.agents/skills and .claude/skills
+# under the working dir) regardless of which global dir the skills CLI used for
+# the AI_CLI in question (see provider_skill_agent). $WORK is the agent's
+# --chdir root. Copy only this skill's own directory, not the whole source
+# tree — $HOME/.claude/skills in particular is the user's personal, global
+# Claude Code skill collection (their own project-specific skills), and a
+# wholesale copy would leak all of it into the sandboxed agent.
+mkdir -p "$WORK/.agents/skills" "$WORK/.claude/skills"
+for src in "$HOME/.agents/skills/odoo-demo-csv" "$HOME/.gemini/antigravity/skills/odoo-demo-csv" "$HOME/.claude/skills/odoo-demo-csv"; do
+    if [[ -d "$src" ]]; then
+        cp -r "$src" "$WORK/.agents/skills/" 2>/dev/null || true
+        # Make skills visible to Claude Code as project-scoped skills
+        cp -r "$src" "$WORK/.claude/skills/" 2>/dev/null || true
+    fi
 done
 
-# Generate a self-contained launcher inside the scratch dir. It runs agy inside a
-# bubblewrap jail: the whole system is read-only, only the scratch dir + agy's own
+# Generate a self-contained launcher inside the scratch dir. It runs agy inside an
+# OS-level jail: the whole system is read-only, only the scratch dir + agy's own
 # config/cache are writable, sensitive home dirs are masked, network is on, and
 # only the ODOO_* credentials are exposed. So the agent's only real capability is
 # to run the CRUD tool against the target database.
 #
-# The heredoc is quoted ('LAUNCH') so nothing expands now: ODOO_* / AGY_MODEL /
-# HOME are read from the environment at run time (inherited via `script`), keeping
-# secrets out of this file on disk.
+# The jail technology differs per platform:
+#   • Linux : bubblewrap (bwrap) namespaces.
+#   • macOS : Seatbelt via sandbox-exec + a generated SBPL profile. There is no
+#             PID/mount-namespace equivalent, so we translate the bwrap policy to
+#             "everything readable, filesystem read-only, writes only to the
+#             scratch dir + agy's config/cache/tmp, ~/.ssh unreadable, network on".
+#
+# The heredoc is quoted ('LAUNCH') so nothing expands now: ODOO_* / AI_BIN /
+# AI_MODEL / HOME are read from the environment at run time, keeping secrets out
+# of this file on disk.
 cat > "$WORK/launch.sh" <<'LAUNCH'
 #!/usr/bin/env bash
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# Ground truth for whether the model actually ran odoo-crud at all, checked
+# against its claimed SUMMARY after the run — see the CRUD_WRAPPER above and
+# the audit check below.
+export ODOO_CRUD_AUDIT_LOG="$HERE/.odoo-crud-calls.log"
 
+# Build the actual "$AI_BIN ...args" invocation into the AI_ARGV array. Each
+# provider has its own flag shape (agy: positional prompt + --sandbox/
+# --print-timeout; copilot: -p/-i + --allow-tool; claude: -p + --allowed-tools/
+# --disallowed-tools. Neither copilot nor claude has a native timeout flag, so
+# headless mode is wrapped in the `timeout` command instead).
+#
+# copilot's tool restriction is a per-invocation flag, not a settings file:
+# --allow-tool='shell(odoo-crud),...' pre-approves exactly the CRUD wrapper
+# (verified empirically: with this flag alone, 'cat /etc/passwd' and 'touch
+# <file>' were both attempted by the model and then DENIED by copilot's own
+# runtime, while 'odoo-crud ...' actually ran). --available-tools was tried
+# too but rejected: it doesn't enforce the "(odoo-crud)" sub-command filter at
+# all (a bare '--available-tools=shell(odoo-crud)' let arbitrary shell
+# commands through) and in combination confused the model into refusing even
+# odoo-crud calls. --allow-all-tools was rejected outright — real command
+# execution proved it approves genuinely dangerous commands, not just the
+# allowlisted one. --allow-all-urls is still needed (web_fetch/web_search
+# require a separate, per-URL permission on top of the tool permission).
+#
+# Known, accepted residual: copilot has a small built-in bypass for a couple
+# of intrinsically harmless commands (e.g. 'echo', 'cd') that always skip
+# approval regardless of --allow-tool — GitHub's own docs describe this. bwrap
+# / Seatbelt is the actual hard backstop here (read-only filesystem outside
+# the scratch dir), exactly as it already is for agy, so this bypass can't do
+# anything the sandbox doesn't already allow.
+#
+# claude's tool restriction is also per-invocation: --allowed-tools scopes the
+# exact Bash pattern for the CRUD wrapper plus Read/Write/Edit/WebFetch/WebSearch;
+# --disallowed-tools 'mcp__*' strips out any MCP servers the user's own global
+# ~/.claude config might define, so the allowlist can't be widened by config
+# already sitting on the machine. --permission-mode dontAsk (not 'default') is
+# what actually makes that allowlist exclusive: 'default' still prompts for
+# anything the allowlist doesn't cover — which is exactly what surfaced as a
+# confirmation dialog when the model wrote and then tried to *run* a throwaway
+# Python script instead of calling odoo-crud. 'dontAsk' auto-denies anything
+# outside --allowed-tools instead of asking, in both interactive and headless
+# -p mode, and also closes off a locally saved bypassPermissions/acceptEdits
+# default from silently widening what runs unattended. Same as the other
+# providers, bwrap / Seatbelt remains the hard backstop underneath.
+build_ai_argv() {
+    local mode="${MODE:-batch}" request; request="$(cat "$HERE/request.txt")"
+    case "$AI_CLI" in
+        agy)
+            if [[ "$mode" == "interactive" ]]; then
+                AI_ARGV=("$AI_BIN" --sandbox --model "$AI_MODEL" -i "$request")
+            else
+                AI_ARGV=("$AI_BIN" -p "$request" --model "$AI_MODEL" --print-timeout "$AGY_TIMEOUT")
+            fi
+            ;;
+        copilot)
+            local tools='shell(odoo-crud),read,write,web_fetch,web_search'
+            if [[ "$mode" == "interactive" ]]; then
+                AI_ARGV=("$AI_BIN" --model "$AI_MODEL" --allow-tool="$tools" --allow-all-urls -i "$request")
+            else
+                AI_ARGV=("$AI_BIN" --model "$AI_MODEL" --allow-tool="$tools" \
+                    --allow-all-urls --no-ask-user -s -p "$request")
+                command -v timeout >/dev/null 2>&1 && AI_ARGV=(timeout "$AGY_TIMEOUT" "${AI_ARGV[@]}")
+            fi
+            ;;
+        claude)
+            local allowed=("Bash(odoo-crud:*)" "Read" "Write" "Edit" "WebFetch" "WebSearch")
+            if [[ "$mode" == "interactive" ]]; then
+                AI_ARGV=("$AI_BIN" "$request" --model "$AI_MODEL" --permission-mode dontAsk \
+                    --allowed-tools "${allowed[@]}" --disallowed-tools "mcp__*")
+            else
+                AI_ARGV=("$AI_BIN" "$request" -p --model "$AI_MODEL" --permission-mode dontAsk \
+                    --allowed-tools "${allowed[@]}" --disallowed-tools "mcp__*")
+                command -v timeout >/dev/null 2>&1 && AI_ARGV=(timeout "$AGY_TIMEOUT" "${AI_ARGV[@]}")
+            fi
+            ;;
+    esac
+}
+
+# --- macOS: Seatbelt (sandbox-exec) --------------------------------------- #
+# No bubblewrap on macOS. Build an SBPL profile that mirrors the bwrap policy
+# and hand off to sandbox-exec. The AI CLI inherits ODOO_*/AI_*/AGY_* straight
+# from this process's environment (no --setenv needed). Paths must be the physical ones
+# the kernel sees, so resolve $HERE with `pwd -P` (mktemp lives under a symlink).
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    HERE_P="$(cd "$HERE" && pwd -P)"
+    SB="$HERE/jail.sb"
+    cat > "$SB" <<SBPL
+(version 1)
+(allow default)
+(deny file-write*)
+(allow file-write*
+    (subpath "$HERE_P")
+    (subpath "$HOME/.gemini")
+    (subpath "$HOME/.copilot")
+    (subpath "$HOME/.claude")
+    (subpath "$HOME/.cache")
+    (subpath "$HOME/.config")
+    (subpath "$HOME/Library/Caches")
+    (subpath "$HOME/Library/Application Support")
+    (subpath "/private/tmp")
+    (subpath "/private/var/tmp")
+    (subpath "/private/var/folders")
+    (literal "/dev/null") (literal "/dev/zero")
+    (regex #"^/dev/(tty|fd|stdin|stdout|stderr)"))
+(deny file-read* (subpath "$HOME/.ssh"))
+SBPL
+    build_ai_argv
+    exec sandbox-exec -f "$SB" "${AI_ARGV[@]}"
+fi
+
+# --- Linux: bubblewrap ----------------------------------------------------- #
 bwrap_args=(
     --ro-bind / /
     --dev /dev --proc /proc --tmpfs /tmp
     --bind "$HERE" "$HERE"
     --bind "$HOME/.gemini" "$HOME/.gemini"
+    --bind "$HOME/.copilot" "$HOME/.copilot"
+    --bind "$HOME/.claude" "$HOME/.claude"
     --bind "$HOME/.cache" "$HOME/.cache"
     --tmpfs "$HOME/.ssh"
     --chdir "$HERE"
@@ -416,19 +1097,25 @@ bwrap_args=(
     --setenv ODOO_LOGIN "$ODOO_LOGIN"
     --setenv ODOO_SECRET "$ODOO_SECRET"
     --setenv ODOO_SCOPE "$ODOO_SCOPE"
+    --setenv ODOO_CRUD_AUDIT_LOG "$ODOO_CRUD_AUDIT_LOG"
 )
 [[ -n "${ODOO_DB:-}" ]] && bwrap_args+=(--setenv ODOO_DB "$ODOO_DB")
 [[ -n "${ANTIGRAVITY_TOKEN:-}" ]] && bwrap_args+=(--setenv ANTIGRAVITY_TOKEN "$ANTIGRAVITY_TOKEN")
+[[ -n "${COPILOT_GITHUB_TOKEN:-}" ]] && bwrap_args+=(--setenv COPILOT_GITHUB_TOKEN "$COPILOT_GITHUB_TOKEN")
+[[ -n "${GH_TOKEN:-}" ]] && bwrap_args+=(--setenv GH_TOKEN "$GH_TOKEN")
+[[ -n "${GITHUB_TOKEN:-}" ]] && bwrap_args+=(--setenv GITHUB_TOKEN "$GITHUB_TOKEN")
+[[ -n "${ANTHROPIC_API_KEY:-}" ]] && bwrap_args+=(--setenv ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY")
+[[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && bwrap_args+=(--setenv CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN")
+[[ -n "${COPILOT_PROVIDER_BASE_URL:-}" ]] && bwrap_args+=(--setenv COPILOT_PROVIDER_BASE_URL "$COPILOT_PROVIDER_BASE_URL")
+[[ -n "${COPILOT_PROVIDER_TYPE:-}" ]] && bwrap_args+=(--setenv COPILOT_PROVIDER_TYPE "$COPILOT_PROVIDER_TYPE")
+[[ -n "${COPILOT_PROVIDER_API_KEY:-}" ]] && bwrap_args+=(--setenv COPILOT_PROVIDER_API_KEY "$COPILOT_PROVIDER_API_KEY")
+[[ -n "${COPILOT_MODEL:-}" ]] && bwrap_args+=(--setenv COPILOT_MODEL "$COPILOT_MODEL")
 
-if [[ "${MODE:-batch}" == "interactive" ]]; then
-    exec bwrap "${bwrap_args[@]}" agy --sandbox --model "$AGY_MODEL" "$(cat "$HERE/request.txt")"
-else
-    exec bwrap "${bwrap_args[@]}" \
-        agy -p "$(cat "$HERE/request.txt")" --model "$AGY_MODEL" --print-timeout "$AGY_TIMEOUT"
-fi
+build_ai_argv
+exec bwrap "${bwrap_args[@]}" "${AI_ARGV[@]}"
 LAUNCH
 chmod +x "$WORK/launch.sh"
-export AGY_MODEL AGY_TIMEOUT
+export AI_CLI AI_BIN AI_MODEL AGY_TIMEOUT
 
 if [[ "$INTERACTIVE" -eq 1 ]]; then
     # Interactive: the terminal is already a TTY, run the launcher directly.
@@ -441,29 +1128,183 @@ fi
 # the captured output. Prefer util-linux `script`; fall back to a tiny Python pty
 # wrapper so no extra system package is required (python3 is already a dependency).
 pty_run() {
-    if command -v script >/dev/null 2>&1; then
+    # util-linux `script` takes `-qec CMD FILE`; BSD/macOS `script` has a totally
+    # different signature (no -c). `script --version` succeeds only on util-linux,
+    # so use it there and fall back everywhere else (macOS, or no `script`) to a
+    # tiny Python pty wrapper — portable and it preserves the child exit code.
+    if script --version >/dev/null 2>&1; then
         script -qec "$1" /dev/null
     else
+        # Not plain pty.spawn(): on macOS the pty master never signals EOF/error
+        # once the child exits (a long-standing CPython bug — spawn()'s select()
+        # loop blocks forever even though all output already streamed), so the
+        # whole pipeline hangs after the agent finishes instead of returning.
+        # Poll the child's exit status directly instead of waiting on EOF, and
+        # only stop once a post-exit read comes back empty (fully drained).
         python3 - "$1" <<'PY'
-import os, pty, sys
-os._exit(os.waitstatus_to_exitcode(pty.spawn([sys.argv[1]])))
+import os, sys, pty, select
+
+def spawn(argv):
+    pid, master_fd = pty.fork()
+    if pid == 0:
+        os.execvp(argv[0], argv)
+    exited = False
+    status = 0
+    while True:
+        rfds, _, _ = select.select([master_fd], [], [], 0.25)
+        got_data = False
+        if master_fd in rfds:
+            try:
+                data = os.read(master_fd, 4096)
+            except OSError:
+                data = b""
+            if data:
+                os.write(1, data)
+                got_data = True
+        if not exited:
+            wpid, status = os.waitpid(pid, os.WNOHANG)
+            if wpid == pid:
+                exited = True
+        if exited and not got_data:
+            break
+    os.close(master_fd)
+    return status
+
+sys.exit(os.waitstatus_to_exitcode(spawn([sys.argv[1]])))
 PY
     fi
 }
 
+# ANSI-escape stripper, portable across GNU and BSD sed:
+#   • `-E` (extended regex) is understood by both (GNU aliases it to -r).
+#   • unbuffered/line-buffered output keeps progress live: GNU uses -u, BSD -l.
+#   • `\x1B` is a GNU-only escape, so feed sed a literal ESC byte instead.
+ESC=$(printf '\033')
+if sed --version >/dev/null 2>&1; then SED_STREAM=(-u -E); else SED_STREAM=(-l -E); fi
+
+# The AI CLI can fail (e.g. a quota/auth error from the backend) without ever
+# writing a byte to its own stdout/the pty — the failure only lands in its own
+# CLI log. Mark the time before the run so we can find that log afterwards and
+# surface the real error instead of just "review the output above" when there
+# is no output.
+AGY_LOG_DIR="$(provider_log_dir)"
+AGY_LOG_GLOB="$(provider_log_glob)"
+AGY_LOG_ERROR_PATTERN="$(provider_log_error_pattern)"
+AGY_LOG_MARK="$WORK/.agy-log-mark"
+touch "$AGY_LOG_MARK"
+
 LOG="$WORK/agy-output.log"
+# Ground truth for whether the model actually ran odoo-crud, independent of
+# whatever it claims in its own SUMMARY (see CRUD_WRAPPER above, Step 2 —
+# every real invocation + its exit code is appended there, so a model that
+# just narrates fake tool calls and results — a real failure mode, especially
+# with weaker/free models via --openrouter-model — leaves this file empty).
+AUDIT_LOG="$WORK/.odoo-crud-calls.log"
+
 set +e
 pty_run "$WORK/launch.sh" \
-    | sed -u -r 's/\x1B\[[0-9;]*[A-Za-z]//g' | tr -d '\r' | tee "$LOG"
+    | sed "${SED_STREAM[@]}" "s/${ESC}\[[0-9;]*[A-Za-z]//g" | tr -d '\r' > "$LOG"
 status=${PIPESTATUS[0]}
 set -e
 
+# $WORK is deleted on exit (see the trap above), so persist this run's full
+# transcript + odoo-crud audit trail somewhere that survives the process, and
+# print it below — no matter how the run turns out — so it's always there to
+# inspect instead of only "see the output above" in a scrollback that may
+# already be gone.
+PERSIST_LOG_DIR="$HOME/.local/share/odoo-demo-feeder/logs"
+mkdir -p "$PERSIST_LOG_DIR"
+PERSIST_LOG="$PERSIST_LOG_DIR/run-$(date -u +%Y%m%dT%H%M%SZ).log"
+{
+    cat "$LOG" 2>/dev/null
+    echo
+    echo "----- odoo-crud calls actually made (audit trail) -----"
+    if [[ -s "$AUDIT_LOG" ]]; then
+        cat "$AUDIT_LOG"
+    else
+        echo "(none — odoo-crud was never invoked)"
+    fi
+} > "$PERSIST_LOG" 2>/dev/null || true
+info "Full log: file://$PERSIST_LOG"
+
+show_agy_log_errors() {
+    [[ -d "$AGY_LOG_DIR" ]] || return 0
+    local f errs
+    # Log filenames embed a sortable timestamp, so a plain lexicographic sort
+    # picks the most recent one — no need for `stat`, whose flags differ
+    # between macOS (BSD) and Linux (GNU).
+    f="$(find "$AGY_LOG_DIR" -name "$AGY_LOG_GLOB" -newer "$AGY_LOG_MARK" 2>/dev/null | sort | tail -n1)"
+    [[ -n "$f" ]] || return 0
+    errs="$(grep -E "$AGY_LOG_ERROR_PATTERN" "$f" 2>/dev/null | tail -n3)"
+    [[ -n "$errs" ]] || return 0
+    warn "$AI_BIN's own log ($f) reports:"
+    printf '%s\n' "$errs" | sed 's/^/    /' >&2
+}
+
+# BYOK (e.g. OpenRouter) provider errors are the trickiest to diagnose: the
+# HTTP status code Copilot surfaces is often generic/misleading (e.g. it
+# reported "403" for what OpenRouter's own JSON body called a 402 insufficient-
+# credits error), and the real reason only shows up in the provider's response
+# body, not in Copilot's own log. Recognize this class of failure from the
+# transcript and point straight at the likely cause + a way to self-check.
+diagnose_provider_error() {
+    [[ -n "${COPILOT_PROVIDER_BASE_URL:-}" ]] || return 0
+    grep -qiE 'authentication failed with provider|HTTP 40[0-9]' "$LOG" 2>/dev/null || return 0
+    warn "This looks like a BYOK provider error ($COPILOT_PROVIDER_BASE_URL, model $AI_MODEL)."
+    if grep -qiE 'HTTP 402|insufficient credit' "$LOG"; then
+        warn "  → Insufficient credits on that provider account. Add credits, or use a
+     free-tier model (often suffixed ':free'): https://openrouter.ai/settings/credits"
+    elif grep -qiE 'HTTP 401|invalid.*api.?key|unauthorized' "$LOG"; then
+        warn "  → The stored key looks invalid or revoked. Re-store it:
+     keyring set $OPENROUTER_KEYRING_SERVICE $OPENROUTER_KEYRING_ACCOUNT"
+    else
+        warn "  → The reported HTTP code alone can be misleading (a real case here was
+     a 403 that was actually a 402 insufficient-credits error underneath).
+     Check the key directly against the provider to see its real error body:
+       curl -s ${COPILOT_PROVIDER_BASE_URL%/}/chat/completions \\
+         -H \"Authorization: Bearer \$(keyring get $OPENROUTER_KEYRING_SERVICE $OPENROUTER_KEYRING_ACCOUNT)\" \\
+         -H 'Content-Type: application/json' \\
+         -d '{\"model\":\"$AI_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'"
+    fi
+}
+
+# See AUDIT_LOG's definition above (right after LOG).
+check_real_writes_happened() {
+    if [[ ! -s "$AUDIT_LOG" ]]; then
+        warn "odoo-crud was never actually invoked during this run."
+        warn "  → The model narrated tool calls and a summary without ever running them —"
+        warn "    nothing was written to the database. This is a known failure mode with"
+        warn "    models that don't reliably support real tool/function calling; if you're"
+        warn "    using --openrouter-model, try a different (typically larger) model."
+        return 1
+    fi
+    if ! grep -qE '\b(create|write|unlink|import-csv|set-image|call)\b.*exit=0$' "$AUDIT_LOG"; then
+        warn "odoo-crud never completed a write during this run (see $AUDIT_LOG)."
+        warn "  → Either no create/write/unlink/import-csv/set-image/call was ever made, or"
+        warn "    every one of them failed (nonzero exit) — the database was not actually"
+        warn "    modified despite the summary below. Check the log above for the real error"
+        warn "    each failed call returned, then retry."
+        return 1
+    fi
+    return 0
+}
+
 echo
-if grep -q '^SUMMARY:' "$LOG" 2>/dev/null; then
+# Match loosely (case-insensitive, no line-start anchor): providers sometimes
+# wrap the requested plain-text line in markdown decoration (e.g. '**SUMMARY:**'
+# or a leading bullet) despite being told not to.
+if grep -qi 'SUMMARY:' "$LOG" 2>/dev/null && check_real_writes_happened; then
     printf '%s\n' "${GREEN}✔ Done!${RESET}"
-    grep '^SUMMARY:' "$LOG" | sed "s/^/  ${GREEN}/; s/\$/${RESET}/"
+    grep -i 'SUMMARY:' "$LOG" | sed "s/^/  ${GREEN}/; s/\$/${RESET}/"
+elif grep -qi 'SUMMARY:' "$LOG" 2>/dev/null; then
+    printf '%s\n' "${DIM}Reported summary (not trusted — see warning above):${RESET}"
+    grep -i 'SUMMARY:' "$LOG" | sed "s/^/  ${DIM}/; s/\$/${RESET}/"
+    die "The run reported success but never actually wrote to the database."
 elif [[ "$status" -ne 0 ]]; then
+    diagnose_provider_error
+    show_agy_log_errors
     die "The AI agent exited with an error (code $status). See the output above."
 else
+    show_agy_log_errors
     warn "The agent finished but produced no SUMMARY line — please review the output above."
 fi

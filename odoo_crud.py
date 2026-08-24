@@ -10,6 +10,11 @@ Environment variables (set by the launcher):
     ODOO_LOGIN    the user login (often an email)
     ODOO_SECRET   the API key or password
 
+Optional:
+    ODOO_DB              database name, when it is not the URL's first label
+    ODOO_CRUD_SESSION    where the authenticated uid is cached between
+                         processes; set it empty to authenticate every time
+
 Every command prints a single JSON object to stdout:
     {"ok": true,  "result": <data>}
     {"ok": false, "error": "<message>"}
@@ -19,9 +24,11 @@ machine-readable feedback it can reason about (e.g. to debug a failing import).
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
+import tempfile
 import xmlrpc.client
 
 
@@ -37,6 +44,18 @@ def ok(result):
     sys.exit(0)
 
 
+def fail_result(result):
+    """Print a structured failure payload and exit non-zero.
+
+    Same shape as ok(), but ok=false and exit 1. Used where the failure has more
+    to say than one error string — a rolled-back import carries per-row
+    messages. Reporting those through ok() made a failed import indistinguishable
+    from a successful one to anything reading the exit code.
+    """
+    print(json.dumps({"ok": False, "result": result}, default=str))
+    sys.exit(1)
+
+
 def get_config():
     url = (os.environ.get("ODOO_URL") or "").rstrip("/")
     login = os.environ.get("ODOO_LOGIN") or ""
@@ -46,29 +65,138 @@ def get_config():
     return url, login, secret
 
 
-def connect():
-    """Authenticate and return (uid, models_proxy, url, db, login, secret)."""
-    url, login, secret = get_config()
-    common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common", allow_none=True)
-    try:
-        version = common.version()
-    except Exception as exc:  # noqa: BLE001 - report any transport error verbatim
-        fail(f"Cannot reach Odoo at {url}: {exc}")
+_CONNECTION = None
+_FROM_SESSION = False
 
+
+def _session_path():
+    """Where the uid is cached between processes, or None if disabled.
+
+    ODOO_CRUD_SESSION overrides the location; set it empty to turn the cache
+    off. Defaults under XDG_CACHE_HOME, which the sandbox binds read-write.
+    """
+    if "ODOO_CRUD_SESSION" in os.environ:
+        return os.environ["ODOO_CRUD_SESSION"] or None
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache"
+    )
+    return os.path.join(base, "odoo-crud", "session.json")
+
+
+def _fingerprint(url, db, login, secret):
+    """Identify the credentials a cached uid belongs to, without storing them.
+
+    The secret is in there so that rotating the API key misses the cache
+    instead of replaying a uid the new key never earned.
+    """
+    material = "\0".join((url, db, login, secret)).encode()
+    return hashlib.sha256(material).hexdigest()[:32]
+
+
+def _load_session(fingerprint):
+    path = _session_path()
+    if not path:
+        return None
+    try:
+        with open(path) as handle:
+            data = json.load(handle)
+    except Exception:  # noqa: BLE001 - a missing or corrupt cache is just a miss
+        return None
+    if not isinstance(data, dict) or data.get("fingerprint") != fingerprint:
+        return None
+    uid = data.get("uid")
+    return (uid, data.get("version")) if isinstance(uid, int) and uid else None
+
+
+def _save_session(fingerprint, uid, version):
+    path = _session_path()
+    if not path:
+        return
+    payload = {"fingerprint": fingerprint, "uid": uid, "version": version}
+    directory = os.path.dirname(os.path.abspath(path))
+    try:
+        os.makedirs(directory, exist_ok=True)
+        # Written whole-then-renamed: two odoo-crud processes can overlap, and a
+        # half-written file would be read back as a corrupt cache.
+        handle, tmp = tempfile.mkstemp(dir=directory)
+        with os.fdopen(handle, "w") as stream:
+            json.dump(payload, stream)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001 - caching is an optimisation, never fatal
+        pass
+
+
+def _forget_session():
+    global _FROM_SESSION
+    _FROM_SESSION = False
+    path = _session_path()
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def connect(force=False):
+    """Authenticate and return (uid, models_proxy, url, db, login, secret, version).
+
+    Memoized for the life of the process, and the uid is cached on disk between
+    processes. Authenticating once per RPC cost two extra round trips (version +
+    authenticate) on every call — install-modules alone paid that five times.
+    XML-RPC is stateless per request, so the uid and the proxies stay valid for
+    the whole run; reusing the ServerProxy also keeps its HTTP connection alive
+    between calls, which saves the TLS handshake too.
+
+    The on-disk half matters because the agent gets one process per odoo-crud
+    invocation, so in-process memoization alone still left a full login — and
+    Odoo hashes the password on every authenticate(), around half a second — in
+    front of every single command. execute_kw's own credential check is cached
+    server-side, so replaying a known uid skips the login entirely.
+
+    Pass force=True to drop both caches and authenticate again (see execute(),
+    which does that if the kept-alive socket has gone stale or the server
+    rejects the replayed uid).
+    """
+    global _CONNECTION, _FROM_SESSION
+    if _CONNECTION is not None and not force:
+        return _CONNECTION
+    _CONNECTION = None
+    _FROM_SESSION = False
+
+    url, login, secret = get_config()
     # The database name is usually the host's first label for SaaS, but it can
     # be set explicitly via ODOO_DB. authenticate() needs a db name.
     db = os.environ.get("ODOO_DB") or _guess_db(url)
-    try:
-        uid = common.authenticate(db, login, secret, {})
-    except Exception as exc:  # noqa: BLE001
-        fail(f"Authentication call failed: {exc}")
-    if not uid:
-        fail(
-            "Authentication failed: wrong login/API key, or wrong database "
-            f"name '{db}'. Set ODOO_DB if the database name differs from the host."
+    fingerprint = _fingerprint(url, db, login, secret)
+
+    cached = None if force else _load_session(fingerprint)
+    if cached:
+        uid, version = cached
+        _FROM_SESSION = True
+    else:
+        common = xmlrpc.client.ServerProxy(
+            f"{url}/xmlrpc/2/common", allow_none=True
         )
+        try:
+            version = common.version()
+        except Exception as exc:  # noqa: BLE001 - report transport errors verbatim
+            fail(f"Cannot reach Odoo at {url}: {exc}")
+        try:
+            uid = common.authenticate(db, login, secret, {})
+        except Exception as exc:  # noqa: BLE001
+            fail(f"Authentication call failed: {exc}")
+        if not uid:
+            fail(
+                "Authentication failed: wrong login/API key, or wrong database "
+                f"name '{db}'. Set ODOO_DB if the database name differs from the host."
+            )
+        _save_session(fingerprint, uid, version)
+
     models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object", allow_none=True)
-    return uid, models, url, db, login, secret, version
+    _CONNECTION = (uid, models, url, db, login, secret, version)
+    return _CONNECTION
 
 
 def _guess_db(url):
@@ -77,16 +205,59 @@ def _guess_db(url):
     return host.split(".", 1)[0]
 
 
+def _stale_uid(fault, uid):
+    """Does this Fault say the acting uid itself is no longer valid?
+
+    Two shapes, depending on what happened to the user behind a cached uid:
+    a wrong password for an existing one raises AccessDenied, a deleted one
+    (database rebuilt underneath us) raises MissingError naming res.users. The
+    res.users(uid,) match is what keeps this from swallowing an ordinary
+    MissingError about the records the command was actually working on.
+    """
+    text = str(fault.faultString)
+    return "access denied" in text.lower() or f"res.users({uid}," in text
+
+
+_CONTEXT = {}
+
+
 def execute(model, method, args=None, kwargs=None):
-    uid, models, url, db, login, secret, _version = connect()
-    try:
-        return models.execute_kw(
-            db, uid, secret, model, method, args or [], kwargs or {}
-        )
-    except xmlrpc.client.Fault as fault:
-        fail(f"Odoo error in {model}.{method}: {fault.faultString}")
-    except Exception as exc:  # noqa: BLE001
-        fail(f"Call {model}.{method} failed: {exc}")
+    # The --context flag rides on every call made by this process. Odoo behaviour
+    # that is only reachable through the context was simply unreachable through
+    # this tool before: chiefly 'active_test', without which search-read hides
+    # every archived record, so the inactive currency the demo actually needs
+    # reads as "does not exist in this database".
+    kwargs = dict(kwargs or {})
+    if _CONTEXT and "context" not in kwargs:
+        kwargs["context"] = _CONTEXT
+
+    # Two attempts: the connection is now reused across calls, so its kept-alive
+    # socket can go cold when the server reloads its registry (which is exactly
+    # what button_immediate_install does). xmlrpc's own Transport already
+    # re-opens a merely-dropped socket; this outer retry covers the case it does
+    # not — the server still refusing when that immediate retry runs — by
+    # authenticating again from scratch. An Odoo Fault is an application error,
+    # never a connection problem, so it is reported as-is without a retry.
+    for attempt in (0, 1):
+        uid, models, _url, db, _login, secret, _version = connect(force=bool(attempt))
+        try:
+            return models.execute_kw(
+                db, uid, secret, model, method, args or [], kwargs
+            )
+        except xmlrpc.client.Fault as fault:
+            # One kind of Fault is not an application error: a uid replayed from
+            # the session cache that the server no longer accepts. Drop the
+            # cache and earn a fresh uid before believing it. Retrying is safe
+            # precisely because these are raised by the credential check, before
+            # the method itself runs — so the first attempt wrote nothing.
+            if attempt == 0 and _FROM_SESSION and _stale_uid(fault, uid):
+                _forget_session()
+                continue
+            fail(f"Odoo error in {model}.{method}: {fault.faultString}")
+        except Exception as exc:  # noqa: BLE001
+            if attempt == 0:
+                continue
+            fail(f"Call {model}.{method} failed: {exc}")
 
 
 def parse_json(value, what):
@@ -102,8 +273,85 @@ def parse_json(value, what):
 # Commands
 # --------------------------------------------------------------------------- #
 def cmd_auth_check(_args):
-    uid, _models, url, db, login, _secret, version = connect()
+    # The one command whose job is to prove the credentials work, so it always
+    # logs in for real rather than trusting a cached uid — and, being the first
+    # command of the run, it is what fills the cache for every command after it.
+    uid, _models, url, db, login, _secret, version = connect(force=True)
     ok({"uid": uid, "url": url, "database": db, "login": login, "version": version})
+
+
+_BLACKHOLE_MAIL_SERVER_NAME = "Demo Feeder Black Hole (do not remove)"
+
+
+def cmd_disable_outgoing_mail(_args):
+    """Make outgoing mail fail closed, so a demo run never emails anyone for real.
+
+    Called directly by the launcher script before the agent ever starts — never
+    by the agent itself, so it cannot be skipped by a model that forgets or a
+    template that doesn't ask for it. Two steps:
+
+    1. Deactivate every ir.mail_server already configured on the target
+       database — it may be wired to a real SMTP relay from before this tool
+       ever touched it.
+    2. Point the database at one dummy, unreachable server instead of leaving
+       none configured at all: with zero active ir.mail_server records, Odoo's
+       mail path falls back to a direct connection attempt to localhost:25,
+       which actually sends if the host happens to run a local MTA. An
+       explicit bogus host removes that fallback path entirely — every send
+       attempt fails the SMTP connection and the mail stays queued as an
+       exception, never leaving the machine.
+    """
+    existing = execute(
+        "ir.mail_server", "search_read", [[]],
+        {"fields": ["id", "active"], "context": {"active_test": False}},
+    )
+    active_ids = [r["id"] for r in existing if r.get("active")]
+    if active_ids:
+        execute("ir.mail_server", "write", [active_ids, {"active": False}])
+
+    blackhole = execute(
+        "ir.mail_server", "search_read",
+        [[["name", "=", _BLACKHOLE_MAIL_SERVER_NAME]]],
+        {"fields": ["id"], "context": {"active_test": False}},
+    )
+    values = {
+        "name": _BLACKHOLE_MAIL_SERVER_NAME,
+        "smtp_host": "blackhole.odoo-demo-feeder.invalid",
+        "smtp_port": 1025,
+        "smtp_encryption": "none",
+        "sequence": 0,
+        "active": True,
+    }
+    if blackhole:
+        server_id = blackhole[0]["id"]
+        execute("ir.mail_server", "write", [[server_id], values])
+    else:
+        server_id = execute("ir.mail_server", "create", [[values]])[0]
+
+    ok({"deactivated_existing": active_ids, "blackhole_server_id": server_id})
+
+
+def _unknown_fields(meta, names):
+    """Names (first dotted path segment, so 'partner_id.name' checks
+    'partner_id') absent from the model's own fields.
+
+    A guessed field name that belongs to a different model (e.g. requesting
+    'team_id' on crm.stage, or filtering uom.uom on 'category_id' — both only
+    exist on other models) fails deep inside Odoo's ORM with a raw traceback in
+    the server log instead of a clean RPC error. Catching it here turns that
+    into one clear line before the call is even made.
+    """
+    unknown = set()
+    for name in names:
+        base = str(name).split(".", 1)[0]
+        if base not in meta and base != "id":
+            unknown.add(name)
+    return sorted(unknown)
+
+
+def _unknown_domain_fields(meta, domain):
+    leaves = [leaf[0] for leaf in domain if isinstance(leaf, (list, tuple)) and len(leaf) == 3]
+    return _unknown_fields(meta, leaves)
 
 
 def cmd_search_read(args):
@@ -114,13 +362,26 @@ def cmd_search_read(args):
         kwargs["fields"] = fields
     if args.limit:
         kwargs["limit"] = args.limit
+    if domain or fields:
+        meta = execute(args.model, "fields_get", [], {"attributes": []})
+        unknown = _unknown_domain_fields(meta, domain) + _unknown_fields(meta, fields or [])
+        if unknown:
+            fail(
+                f"Unknown field(s) for {args.model}: {', '.join(sorted(set(unknown)))}. "
+                f"Check 'odoo-crud fields {args.model}' for the exact field names — "
+                "nothing was searched."
+            )
     ok(execute(args.model, "search_read", [domain], kwargs))
 
 
 def cmd_create(args):
     values = parse_json(args.values, "--values")
     if values is None:
-        fail("--values is required (a JSON object).")
+        fail("--values is required (a JSON object, or a JSON array of objects to batch-create).")
+    # Odoo's create() natively batches: a JSON array of objects creates every
+    # record in one call instead of one round-trip per record.
+    if not isinstance(values, list):
+        values = [values]
     ok(execute(args.model, "create", [values]))
 
 
@@ -155,9 +416,94 @@ def cmd_models(args):
     ok(result)
 
 
+_COMPACT_ATTRS = ["string", "type", "required", "readonly", "store",
+                  "relation", "selection"]
+
+
+def _compact_field(info):
+    """One line per field: type, flags, target model, selection values."""
+    parts = [info.get("type") or "?"]
+    if info.get("required"):
+        parts.append("required")
+    if info.get("readonly"):
+        parts.append("readonly")
+    if not info.get("store", True):
+        parts.append("not-stored")
+    if info.get("relation"):
+        parts.append(f"-> {info['relation']}")
+    selection = info.get("selection")
+    if selection:
+        values = [str(pair[0]) for pair in selection
+                  if isinstance(pair, (list, tuple)) and pair]
+        shown = "|".join(values[:12])
+        if len(values) > 12:
+            shown += f"|+{len(values) - 12} more"
+        parts.append(f"= {shown}")
+    return " ".join(parts)
+
+
 def cmd_fields(args):
-    attrs = ["string", "type", "required", "relation", "selection", "help"]
-    ok(execute(args.model, "fields_get", [], {"attributes": attrs}))
+    """Describe a model's fields (introspection).
+
+    A raw fields_get is enormous — a few hundred fields on res.partner, each
+    carrying a multi-sentence 'help' — and every byte of it lands in the agent's
+    context and is re-sent on every following turn, which costs far more than
+    the data being imported. So the default is one compact line per field
+    ("many2one required -> res.partner"), which is all that is needed to write a
+    CSV. --filter narrows to a name or label substring; --full returns the raw
+    fields_get, help text included, when the description really is needed.
+    """
+    if args.full:
+        ok(execute(args.model, "fields_get", [],
+                   {"attributes": _COMPACT_ATTRS + ["help"]}))
+
+    meta = execute(args.model, "fields_get", [], {"attributes": _COMPACT_ATTRS})
+    names = sorted(meta)
+    if args.filter:
+        # Comma-separated: asking for several named fields at once is the common
+        # case ('name,list_price,barcode'), and treating that as one literal
+        # substring matched nothing — which sent the caller back to dumping every
+        # field, the exact output this command exists to avoid.
+        needles = [part.strip().lower() for part in args.filter.split(",") if part.strip()]
+        names = [
+            name for name in names
+            if any(needle in name.lower()
+                   or needle in str(meta[name].get("string") or "").lower()
+                   for needle in needles)
+        ]
+    result = {
+        "model": args.model,
+        "total_fields": len(meta),
+        "shown": len(names),
+        "fields": {name: _compact_field(meta[name]) for name in names},
+    }
+    if not args.filter and len(meta) > 60:
+        result["hint"] = (
+            f"{len(meta)} fields. Narrow the next lookup with "
+            f"'odoo-crud fields {args.model} --filter <text>'."
+        )
+    ok(result)
+
+
+def _disable_demo_data():
+    """Stop Odoo from loading demo data for modules installed from here on.
+
+    A module's demo data is only loaded on install if the database is
+    flagged as "demo-enabled" (any ir.module.module record, typically
+    'base', has demo=True — set once at database creation). There is no
+    per-call RPC flag to skip it; clearing that flag on every module that
+    currently carries it is what stops button_immediate_install from
+    pulling in demo records for modules installed afterwards.
+    """
+    demo_recs = execute(
+        "ir.module.module", "search_read",
+        [[["demo", "=", True]]], {"fields": ["id"]},
+    )
+    if demo_recs:
+        execute(
+            "ir.module.module", "write",
+            [[r["id"] for r in demo_recs], {"demo": False}],
+        )
 
 
 def cmd_install_modules(args):
@@ -165,8 +511,9 @@ def cmd_install_modules(args):
 
     button_immediate_install is synchronous server-side: when it returns, the
     modules are installed and the registry reloaded. We then re-query the states
-    on a fresh connection (each execute() re-authenticates) so the caller gets a
-    definitive result and never needs to 'wait'.
+    so the caller gets a definitive result and never needs to 'wait'. The re-read
+    is a plain RPC — XML-RPC carries no client-side registry, so reusing the
+    memoized connection still sees the post-install state.
     """
     names = args.modules
     recs = execute(
@@ -178,9 +525,10 @@ def cmd_install_modules(args):
     to_install = [r["id"] for r in recs if r.get("state") == "uninstalled"]
 
     if to_install:
+        _disable_demo_data()
         execute("ir.module.module", "button_immediate_install", [to_install])
 
-    # Fresh connection (registry has reloaded) to report the final states.
+    # Re-read the states after the install to report the final result.
     final = execute(
         "ir.module.module", "search_read",
         [[["name", "in", names]]], {"fields": ["name", "state"]},
@@ -205,14 +553,19 @@ def cmd_set_image(args):
     field = args.field or "image_1920"
     if args.url:
         import urllib.request
+        url = args.url
+        if url.startswith("//"):
+            # Protocol-relative URL (common on Shopify/Sapo storefronts) —
+            # urllib refuses these outright, so assume https.
+            url = "https:" + url
         try:
             req = urllib.request.Request(
-                args.url, headers={"User-Agent": "odoo-demo-feeder"}
+                url, headers={"User-Agent": "odoo-demo-feeder"}
             )
             with urllib.request.urlopen(req, timeout=30) as resp:
                 raw = resp.read()
         except Exception as exc:  # noqa: BLE001
-            fail(f"Could not download image from {args.url}: {exc}")
+            fail(f"Could not download image from {url}: {exc}")
     elif args.file:
         try:
             with open(args.file, "rb") as handle:
@@ -268,26 +621,100 @@ def cmd_import_preview(args):
     headers, body = _read_csv(args.file)
     meta = execute(
         args.model, "fields_get", [],
-        {"attributes": ["string", "type", "relation", "required"]},
+        {"attributes": ["string", "relation"] + _REQUIRED_ATTRS},
     )
+    # The same matcher import-csv refuses on, so a preview that reports no
+    # unknown column is a promise that the import will not be rejected over one
+    # — and a preview that reports one carries the same suggestion.
+    unknown = _unknown_columns(meta, headers)
+    suggestions = dict(unknown)
     columns = []
     for header in headers:
         base = _field_base(header)
-        exists = base == "id" or base in meta
-        columns.append({
+        column = {
             "header": header,
             "field": base,
-            "exists": exists,
+            "exists": header not in suggestions,
             "type": meta.get(base, {}).get("type"),
-        })
-    unknown = [c["header"] for c in columns if not c["exists"]]
+        }
+        if suggestions.get(header):
+            column["suggestion"] = suggestions[header]
+        columns.append(column)
+    missing_required = _missing_required_fields(args.model, meta, headers)
     ok({
         "model": args.model,
         "rows": len(body),
         "columns": columns,
-        "unknown_columns": unknown,
+        "unknown_columns": [
+            {"header": header, "suggestion": suggestion}
+            for header, suggestion in unknown
+        ],
+        "missing_required_columns": missing_required,
         "sample_rows": body[:3],
     })
+
+
+_REQUIRED_ATTRS = ["type", "required", "readonly", "store"]
+
+
+def _unknown_columns(meta, headers):
+    """CSV columns that map to no field, each paired with a near-miss guess.
+
+    Returns [(column, suggestion or None), ...], drawn from the model's real
+    field names — usually enough to fix the CSV without another round trip.
+    Callers do the wording: import-csv folds it into its refusal, import-preview
+    reports it as JSON.
+    """
+    import difflib
+
+    unknown = []
+    for header in headers:
+        base = _field_base(header)
+        if base == "id" or base in meta:
+            continue
+        close = difflib.get_close_matches(base, meta, n=1, cutoff=0.6)
+        if not close:
+            # A renamed field often keeps the old name as a substring
+            # ('detailed_type' -> 'type'), which scores too low for difflib but
+            # is exactly the suggestion worth making. Shortest match wins, so
+            # 'type' is preferred over 'service_tracking_type'.
+            contained = sorted((f for f in meta if f in base or base in f), key=len)
+            close = contained[:1]
+        unknown.append((header, close[0] if close else None))
+    return unknown
+
+
+def _missing_required_fields(model, meta, headers):
+    """Model fields that genuinely have to come from the CSV but are absent.
+
+    A missing required field (e.g. product_id on stock.quant) doesn't always
+    surface as a clean load() message — it can slip through as NULL and crash
+    at the SQL layer with a raw, uncaught 'not-null constraint' error instead.
+    Catching it here, before load() ever runs, turns that into one clear line.
+
+    But 'required' in fields_get describes the field *definition*, not whether
+    a value must be supplied, so it cannot be used on its own. product.template
+    marks type, uom_id, service_tracking and base_unit_count required and every
+    one of them has a default; product_variant_ids is required and is a
+    one2many the ORM fills in itself. Reporting those refuses a perfectly good
+    import, so narrow the list to fields that are writable, stored, not a
+    x2many, and have no default — the last of which only Odoo can answer, via
+    default_get.
+    """
+    present = {_field_base(header) for header in headers}
+    candidates = [
+        name for name, info in meta.items()
+        if info.get("required")
+        and name not in present
+        and not info.get("readonly")
+        and info.get("store", True)
+        and info.get("type") not in ("one2many", "many2many")
+    ]
+    if not candidates:
+        return []
+    # default_get returns an entry only for the fields that do have a default.
+    defaults = execute(model, "default_get", [sorted(candidates)]) or {}
+    return sorted(name for name in candidates if name not in defaults)
 
 
 def cmd_import_csv(args):
@@ -295,6 +722,34 @@ def cmd_import_csv(args):
     the 'field/id' relational syntax, and reports per-row error messages."""
     headers, body = _read_csv(args.file)
     fields = parse_json(args.fields, "--fields") or headers
+
+    meta = execute(args.model, "fields_get", [], {"attributes": _REQUIRED_ATTRS})
+
+    # Reject columns the model does not have *before* load() runs. Otherwise a
+    # single stale field name (detailed_type, renamed in Odoo 18) costs a failed
+    # import plus a full fields_get dump to work out which column was wrong.
+    unknown = _unknown_columns(meta, fields)
+    if unknown:
+        listed = ", ".join(
+            f"{column} (did you mean '{suggestion}'?)" if suggestion else column
+            for column, suggestion in unknown
+        )
+        fail(
+            f"CSV for {args.model} has column(s) that are not fields of the "
+            f"model: {listed}. "
+            f"Check 'odoo-crud fields {args.model} --filter <text>' for the "
+            "exact names — nothing was imported."
+        )
+
+    missing_required = _missing_required_fields(args.model, meta, fields)
+    if missing_required:
+        fail(
+            f"CSV for {args.model} is missing required field(s): "
+            f"{', '.join(missing_required)}. Add a '<field>/id' (relational) or "
+            f"'<field>' column, or check 'odoo-crud fields {args.model}' for the "
+            "exact names — nothing was imported."
+        )
+
     result = execute(args.model, "load", [fields, body])
 
     # load() returns {'ids': [...] or False, 'messages': [...]}. A non-empty
@@ -302,10 +757,20 @@ def cmd_import_csv(args):
     messages = result.get("messages", []) if isinstance(result, dict) else []
     ids = result.get("ids") if isinstance(result, dict) else result
     if messages:
-        ok({"status": "failed", "messages": messages,
-            "imported": 0, "fields_used": fields})
+        fail_result({"status": "failed", "messages": messages,
+                     "imported": 0, "fields_used": fields})
     ok({"status": "imported", "imported": len(ids or []),
         "ids": ids, "fields_used": fields})
+
+
+def _add_context_arg(parser):
+    parser.add_argument(
+        "--context",
+        help="JSON object merged into the Odoo context for this call. Mainly "
+             "'{\"active_test\": false}', which also returns archived records — "
+             "most currencies ship inactive, so without it a perfectly real "
+             "currency looks like it does not exist.",
+    )
 
 
 def build_parser():
@@ -317,36 +782,78 @@ def build_parser():
 
     sub.add_parser("auth-check", help="Verify the connection and credentials.")
 
+    sub.add_parser(
+        "disable-outgoing-mail",
+        help="Deactivate any configured mail server and point the database at "
+             "an unreachable dummy one, so a demo run can never send real "
+             "email. Run once by the launcher itself, before the agent starts.",
+    )
+
     p = sub.add_parser("search-read", help="Search and read records.")
     p.add_argument("model")
     p.add_argument("--domain", help="JSON list, e.g. '[[\"name\",\"=\",\"X\"]]'")
     p.add_argument("--fields", help="JSON list of field names.")
     p.add_argument("--limit", type=int)
+    _add_context_arg(p)
 
-    p = sub.add_parser("create", help="Create a record.")
+    p = sub.add_parser("create", help="Create one or more records (batch: pass a JSON array).")
     p.add_argument("model")
-    p.add_argument("--values", required=True, help="JSON object of field values.")
+    p.add_argument(
+        "--values", required=True,
+        help="JSON object of field values for one record, OR a JSON array of "
+             "objects to create many records in a single call — e.g. "
+             "'[{\"name\": \"A\"}, {\"name\": \"B\"}]'. Prefer batching over "
+             "one create call per record.",
+    )
+    _add_context_arg(p)
 
     p = sub.add_parser("write", help="Update records.")
     p.add_argument("model")
     p.add_argument("--ids", required=True, help="JSON list of ids.")
     p.add_argument("--values", required=True, help="JSON object of field values.")
+    _add_context_arg(p)
 
     p = sub.add_parser("unlink", help="Delete records.")
     p.add_argument("model")
     p.add_argument("--ids", required=True, help="JSON list of ids.")
+    _add_context_arg(p)
 
-    p = sub.add_parser("call", help="Call an arbitrary model method.")
+    p = sub.add_parser(
+        "call",
+        help="Call an arbitrary model method (prefer create/write/unlink/"
+             "search-read when they fit — this is for anything else).",
+        description="Call an arbitrary model method. --args is the method's "
+                     "FULL positional argument list as ONE JSON array — e.g. "
+                     "for write(ids, values) pass "
+                     "--args '[[1], {\"name\": \"X\"}]', not --ids/--values "
+                     "(those belong to the dedicated write command instead).",
+    )
     p.add_argument("model")
     p.add_argument("method")
-    p.add_argument("--args", help="JSON list of positional args.")
+    p.add_argument("--args", help="JSON array of ALL positional args, e.g. '[[1], {\"name\": \"X\"}]' for write.")
     p.add_argument("--kwargs", help="JSON object of keyword args.")
+    _add_context_arg(p)
 
     p = sub.add_parser("models", help="List models (introspection).")
     p.add_argument("--filter", help="Substring to filter the technical name.")
 
-    p = sub.add_parser("fields", help="Describe a model's fields (introspection).")
+    p = sub.add_parser(
+        "fields",
+        help="Describe a model's fields, one compact line each (introspection).",
+    )
     p.add_argument("model")
+    p.add_argument(
+        "--filter",
+        help="Only fields whose technical name or label contains this text. "
+             "Accepts a comma-separated list to look up several at once, e.g. "
+             "--filter 'name,list_price,barcode'. Use it on big models "
+             "(res.partner, product.template) instead of dumping every field.",
+    )
+    p.add_argument(
+        "--full", action="store_true",
+        help="Raw fields_get including every help text — very verbose, only "
+             "when a field's description is genuinely needed.",
+    )
 
     p = sub.add_parser(
         "install-modules",
@@ -372,12 +879,14 @@ def build_parser():
     p.add_argument("model")
     p.add_argument("--file", required=True)
     p.add_argument("--fields", help="JSON list mapping each column to a field.")
+    _add_context_arg(p)
 
     return parser
 
 
 HANDLERS = {
     "auth-check": cmd_auth_check,
+    "disable-outgoing-mail": cmd_disable_outgoing_mail,
     "search-read": cmd_search_read,
     "create": cmd_create,
     "write": cmd_write,
@@ -393,7 +902,13 @@ HANDLERS = {
 
 
 def main():
+    global _CONTEXT
     args = build_parser().parse_args()
+    context = parse_json(getattr(args, "context", None), "--context")
+    if context is not None:
+        if not isinstance(context, dict):
+            fail("--context must be a JSON object, e.g. '{\"inventory_mode\": true}'.")
+        _CONTEXT = context
     HANDLERS[args.command](args)
 
 
