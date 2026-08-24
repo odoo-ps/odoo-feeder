@@ -22,12 +22,20 @@ REPO="odoo-ps/odoo-feeder"
 # Git ref (branch, tag or commit) to fetch the feeder + CRUD tool from. Defaults
 # to main; override to test a branch, e.g. REPO_REF=imp-gum-templates.
 REPO_REF="${REPO_REF:-main}"
-# Which AI CLI drives the agent: "agy" (Antigravity, default), "copilot"
-# (GitHub Copilot CLI) or "claude" (Claude Code).
-AI_CLI="${AI_CLI:-agy}"
+# Which AI CLI drives the agent: "agy" (Antigravity), "copilot" (GitHub
+# Copilot CLI) or "claude" (Claude Code). Prompted for further down when
+# neither --ai-cli nor this env var picks one; AI_CLI_GIVEN tracks that so
+# the prompt is skipped once either has.
+AI_CLI="${AI_CLI:-}"
+AI_CLI_GIVEN=0
+[[ -n "$AI_CLI" ]] && AI_CLI_GIVEN=1
 # OpenRouter BYOK, 'copilot' only (see odoo-demo-feeder --help). Its presence
-# here just tells the sign-in probe below that no GitHub login is needed.
+# here just tells the sign-in probe below that no GitHub login is needed. The
+# API key itself lives in the OS keyring under this service/account, same as
+# odoo-demo-feeder expects — see the keyring step further down.
 OPENROUTER_MODEL="${OPENROUTER_MODEL:-}"
+OPENROUTER_KEYRING_SERVICE="odoo-feeder"
+OPENROUTER_KEYRING_ACCOUNT="openrouter-api-key"
 
 # Parse options to detect AI_CLI and OPENROUTER_MODEL early, so we install and
 # check the right provider. We don't consume them (they must be forwarded to the feeder).
@@ -38,10 +46,12 @@ while [[ $idx -le $# ]]; do
             next_idx=$((idx + 1))
             if [[ $next_idx -le $# ]]; then
                 AI_CLI="${!next_idx}"
+                AI_CLI_GIVEN=1
             fi
             ;;
         --ai-cli=*)
             AI_CLI="${!idx#*=}"
+            AI_CLI_GIVEN=1
             ;;
         --openrouter-model)
             next_idx=$((idx + 1))
@@ -132,6 +142,45 @@ ensure_cmd() {  # ensure_cmd <command> <apt-names> ::: <dnf-names> ::: <brew-nam
     ok "$cmd installed"
 }
 
+# Installing bubblewrap is not the same as being able to sandbox with it.
+# Ubuntu 23.10+ restricts unprivileged user namespaces through AppArmor
+# (kernel.apparmor_restrict_unprivileged_userns=1), so bwrap is present, on PATH,
+# and refuses to create a sandbox — and the feeder only checks that the binary
+# exists, so the run gets all the way to launching the agent before it dies.
+#
+# Ubuntu ships the profile that permits it again, in apparmor-profiles, unlinked.
+# Probe before touching any of that: a machine without the restriction needs
+# none of it, and loading AppArmor profiles is not something to do speculatively.
+ensure_bwrap_works() {
+    local probe=(bwrap --dev-bind / / --unshare-pid true)
+    if "${probe[@]}" >/dev/null 2>&1; then
+        ok "bwrap can sandbox"
+        return 0
+    fi
+    local profile="/usr/share/apparmor/extra-profiles/bwrap-userns-restrict"
+    if [[ "$PM" == "apt" ]]; then
+        warn "bwrap cannot create a sandbox — applying Ubuntu's AppArmor profile..."
+        [[ -f "$profile" ]] || $SUDO apt-get install -y apparmor-profiles >/dev/null 2>&1 || true
+        if [[ -f "$profile" ]]; then
+            # -sf and -r so a second run replaces rather than erroring on a
+            # profile that is already there.
+            $SUDO ln -sf "$profile" /etc/apparmor.d/ 2>/dev/null || true
+            $SUDO apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict 2>/dev/null || true
+        fi
+        if "${probe[@]}" >/dev/null 2>&1; then
+            ok "bwrap can sandbox (AppArmor profile loaded)"
+            return 0
+        fi
+    fi
+    warn "bwrap still cannot create a sandbox, so the run will fail at the point
+   it tries to jail the agent. On Ubuntu 23.10+ this is the unprivileged
+   user-namespace restriction; apply it by hand with:
+     sudo apt install apparmor-profiles
+     sudo ln -s /usr/share/apparmor/extra-profiles/bwrap-userns-restrict /etc/apparmor.d/
+     sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict"
+    return 0
+}
+
 # gum powers the nicer prompts, but it is OPTIONAL — the feeder falls back to
 # plain prompts without it, so every failure here is a warning, never fatal.
 # Prefer real packages: dnf ships gum directly; Debian/Ubuntu need Charm's own
@@ -177,6 +226,27 @@ ensure_gum() {
     return 0
 }
 
+# Plain `apt install nodejs` ships whatever the distro froze at install time —
+# Ubuntu 24.04 is stuck on 18.19.1. Use NodeSource's own repo to pin a current
+# major (24) instead; brew already tracks recent versions, so it needs no repo.
+ensure_node() {
+    command -v node >/dev/null 2>&1 && { ok "node already present"; return 0; }
+    [[ -n "$PM" ]] || die "node is missing and no supported package manager (apt/dnf/brew) was found. Install Node.js 24+ manually."
+    warn "node not found — installing..."
+    case "$PM" in
+        apt)
+            fetch https://deb.nodesource.com/setup_24.x | $SUDO bash - >/dev/null 2>&1
+            $SUDO apt-get install -y nodejs >/dev/null 2>&1 ;;
+        dnf)
+            fetch https://rpm.nodesource.com/setup_24.x | $SUDO bash - >/dev/null 2>&1
+            $SUDO dnf install -y nodejs >/dev/null 2>&1 ;;
+        brew)
+            brew install node >/dev/null 2>&1 ;;
+    esac
+    command -v node >/dev/null 2>&1 || die "Could not install node automatically. Please install Node.js 24+ and re-run."
+    ok "node installed"
+}
+
 # --------------------------------------------------------------------------- #
 # AI CLI provider dispatch — agy (Antigravity), copilot (GitHub Copilot CLI)
 # and claude (Claude Code) are implemented. Unknown providers fail fast,
@@ -205,31 +275,101 @@ provider_install() {
     esac
 }
 
-provider_supported
-
 # --------------------------------------------------------------------------- #
 step "Checking dependencies"
 # --------------------------------------------------------------------------- #
 [[ -n "$DL" ]] || die "curl or wget is required to bootstrap. Install one and re-run."
 ensure_cmd python3 python3            ::: python3        ::: python3
-ensure_cmd node    nodejs npm         ::: nodejs npm     ::: node
+ensure_node
 # The OS-level sandbox differs per platform: Linux uses bubblewrap (installable);
 # macOS uses Seatbelt via sandbox-exec, which is built into the OS — nothing to
 # install there, so we only require bwrap on Linux.
 if [[ "$(uname -s)" != "Darwin" ]]; then
     ensure_cmd bwrap bubblewrap       ::: bubblewrap
+    ensure_bwrap_works
 fi
 ensure_gum                            # optional: nicer prompts, plain fallback
+
+# --------------------------------------------------------------------------- #
+# OpenRouter BYOK needs the 'keyring' CLI (from the Python 'keyring' package)
+# to read the API key, and an actual key stored before odoo-demo-feeder runs —
+# it only reads the keyring, it never prompts. Nothing to do here unless
+# OPENROUTER_MODEL is set.
+# --------------------------------------------------------------------------- #
+if [[ -n "$OPENROUTER_MODEL" ]]; then
+    step "Checking OpenRouter API key"
+    if command -v keyring >/dev/null 2>&1; then
+        ok "keyring already present"
+    else
+        warn "keyring not found — installing..."
+        case "$PM" in
+            apt)  $SUDO apt-get update -y >/dev/null 2>&1 || true
+                  $SUDO apt-get install -y python3-keyring ;;
+            dnf)  $SUDO dnf install -y python3-keyring ;;
+            *)    pip3 install --user keyring ;;
+        esac
+        command -v keyring >/dev/null 2>&1 \
+            || die "Could not install the 'keyring' CLI automatically. Install it yourself (e.g. 'pip install keyring') and re-run."
+        ok "keyring installed"
+    fi
+    if keyring get "$OPENROUTER_KEYRING_SERVICE" "$OPENROUTER_KEYRING_ACCOUNT" >/dev/null 2>&1; then
+        ok "OpenRouter API key already stored"
+    elif [[ -t 0 ]]; then
+        warn "No OpenRouter API key found in the OS keyring — let's store one."
+        keyring set "$OPENROUTER_KEYRING_SERVICE" "$OPENROUTER_KEYRING_ACCOUNT"
+        keyring get "$OPENROUTER_KEYRING_SERVICE" "$OPENROUTER_KEYRING_ACCOUNT" >/dev/null 2>&1 \
+            || die "Still no OpenRouter API key in the keyring."
+        ok "API key stored"
+    else
+        die "No OpenRouter API key found in the OS keyring and no terminal to prompt on. Store it with:
+   keyring set $OPENROUTER_KEYRING_SERVICE $OPENROUTER_KEYRING_ACCOUNT"
+    fi
+fi
+
+# --------------------------------------------------------------------------- #
+# Ask which AI CLI to drive the agent with, when neither --ai-cli nor the
+# AI_CLI env var already picked one. Never silently fall back to agy: an
+# unattended run (no tty to prompt on) says so explicitly instead.
+# --------------------------------------------------------------------------- #
+if [[ "$AI_CLI_GIVEN" -eq 0 ]]; then
+    if [[ -t 0 ]]; then
+        step "Choosing the AI CLI"
+        if command -v gum >/dev/null 2>&1; then
+            AI_CLI="$(gum choose --header "Which AI CLI should drive the agent?" agy copilot claude)"
+        else
+            printf '%s\n' "Which AI CLI should drive the agent?"
+            printf '%s\n' "  1) agy      Antigravity"
+            printf '%s\n' "  2) copilot  GitHub Copilot CLI"
+            printf '%s\n' "  3) claude   Claude Code"
+            read -rp "Choice [1-3]: " reply
+            case "$reply" in
+                1) AI_CLI="agy" ;;
+                2) AI_CLI="copilot" ;;
+                3) AI_CLI="claude" ;;
+                *) die "Invalid choice: $reply" ;;
+            esac
+        fi
+        [[ -n "$AI_CLI" ]] || die "No AI CLI selected."
+        ok "Using $AI_CLI"
+    else
+        AI_CLI="agy"
+        warn "No --ai-cli given and no terminal to prompt on — defaulting to agy."
+    fi
+fi
+provider_supported
 
 # --------------------------------------------------------------------------- #
 step "Installing the AI CLI ($AI_CLI)"
 # --------------------------------------------------------------------------- #
 BIN="$(provider_bin)"
+if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
+    export PATH="$BIN_DIR:$PATH"
+fi
+hash -r 2>/dev/null || true
 if command -v "$BIN" >/dev/null 2>&1; then
     ok "$BIN already present"
 else
     provider_install
-    export PATH="$HOME/.local/bin:$PATH"
     command -v "$BIN" >/dev/null 2>&1 && { "$BIN" install || true; ok "$BIN installed"; } \
         || warn "$BIN installed but not on PATH yet — open a new terminal and run '$BIN' once to log in."
 fi
@@ -325,7 +465,7 @@ elif [[ -t 0 ]]; then
     provider_signed_in || die "Still not signed in. Run '$BIN' to sign in, then re-run."
     ok "Signed in"
 else
-    local token_hint
+    token_hint=""
     case "$AI_CLI" in
         agy)     token_hint="ANTIGRAVITY_TOKEN" ;;
         copilot) token_hint="COPILOT_GITHUB_TOKEN" ;;

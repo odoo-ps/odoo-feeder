@@ -19,7 +19,8 @@ set -euo pipefail
 # Public GitHub repo (owner/repo) holding the demo skills, pulled via `npx skills`.
 # Set it empty (SKILLS_REPO= odoo-demo-feeder) to skip the remote refresh and run
 # whatever is already in ~/.agents/skills — the way to try a skill edit unpushed.
-SKILLS_REPO="${SKILLS_REPO-odoo-ps/odoo-feeder}"
+REPO_REF="${REPO_REF:-main}"
+SKILLS_REPO="${SKILLS_REPO-odoo-ps/odoo-feeder#$REPO_REF}"
 
 # The one-line bootstrap that installs every dependency and fetches this tool.
 # Standalone-run error messages point here (there is no separate install.sh).
@@ -252,7 +253,9 @@ while [[ $# -gt 0 ]]; do
         --notes|--extra)       need_val "$1" "${2:-}"; EXTRA="$2";        GAVE_ARGS=1; shift 2 ;;
         --template)            need_val "$1" "${2:-}"; TEMPLATE_FILE="$2"; GAVE_ARGS=1; shift 2 ;;
         --ai-cli)              need_val "$1" "${2:-}"; AI_CLI="$2";        shift 2 ;;
+        --ai-cli=*)            AI_CLI="${1#*=}";                          shift ;;
         --openrouter-model)    need_val "$1" "${2:-}"; OPENROUTER_MODEL="$2"; shift 2 ;;
+        --openrouter-model=*)  OPENROUTER_MODEL="${1#*=}";                shift ;;
         -i|--interactive)      INTERACTIVE=1; shift ;;
         --plan)                PLAN=1; INTERACTIVE=1; shift ;;
         -h|--help)             usage; exit 0 ;;
@@ -419,6 +422,17 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
 else
     command -v bwrap >/dev/null 2>&1 || die "bubblewrap (bwrap) is not installed.
    Run the one-line bootstrap first: $BOOTSTRAP"
+    # Installed is not the same as usable. Ubuntu 23.10+ blocks unprivileged
+    # user namespaces through AppArmor, so bwrap is on PATH and still cannot
+    # jail anything — and checking only for the binary meant finding that out
+    # after the research, the installs and the imports, at the moment the agent
+    # was due to start.
+    bwrap --dev-bind / / --unshare-pid true >/dev/null 2>&1 || die "bwrap is installed but cannot create a sandbox.
+   On Ubuntu 23.10+ this is the unprivileged user-namespace restriction
+   (kernel.apparmor_restrict_unprivileged_userns=1). Load Ubuntu's profile:
+     sudo apt install apparmor-profiles
+     sudo ln -s /usr/share/apparmor/extra-profiles/bwrap-userns-restrict /etc/apparmor.d/
+     sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict"
 fi
 command -v python3 >/dev/null 2>&1 || die "python3 is not installed.
    Run the one-line bootstrap first: $BOOTSTRAP"
@@ -554,12 +568,12 @@ while :; do
         err_msg=$(printf '%s' "$AUTH_OUT" | python3 -c "import sys, json; print(json.load(sys.stdin).get('error', ''))" 2>/dev/null || true)
         [[ -n "$err_msg" ]] || err_msg="$AUTH_OUT"
         warn "Connection failed: $err_msg"
-        
+
         # If we cannot read input (non-interactive or not a TTY), die immediately
         if [[ ! -t 0 ]]; then
             die "Connection check failed and cannot prompt in non-interactive terminal."
         fi
-        
+
         echo
         info "Please re-enter your credentials."
         new_url=""
@@ -1189,7 +1203,7 @@ AUDIT_LOG="$WORK/.odoo-crud-calls.log"
 
 set +e
 pty_run "$WORK/launch.sh" \
-    | sed "${SED_STREAM[@]}" "s/${ESC}\[[0-9;]*[A-Za-z]//g" | tr -d '\r' | tee "$LOG"
+    | sed "${SED_STREAM[@]}" "s/${ESC}\[[0-9;]*[A-Za-z]//g" | tr -d '\r' > "$LOG"
 status=${PIPESTATUS[0]}
 set -e
 
