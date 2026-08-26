@@ -88,12 +88,21 @@ never assume them.
   compact line per field (`many2one required -> res.partner`), including a
   selection field's allowed values. Filter by the columns you plan to write;
   dumping every field of `res.partner` or `product.template` buries the answer.
-- `odoo-crud install-modules crm stock sale_management account` — every module
-  behind step 5's import order, in ONE call. Read the list straight off that
-  order: `res.partner` → `contacts`, `product.template` → `product` and
-  `sale_management`, stock on hand → `stock`, `crm.lead` → `crm`, plus `account`
-  for invoicing. It installs *and* confirms before returning, and its JSON lists
-  `not_installed` for anything that failed.
+- `odoo-crud install-modules crm stock sale_management purchase account` —
+  every module behind step 5's import order, in ONE call. Read the list
+  straight off that order: `res.partner` → `contacts`, `product.template` →
+  `product` and `sale_management`, stock on hand → `stock`, `crm.lead` →
+  `crm`, plus `account` for invoicing. `purchase` is in there even for a
+  base-only run: a confirmed sale order on an MTO/buy route raises a
+  `purchase.order`, and without the module that confirm fails mid-run instead
+  of just skipping the PO. This list isn't fixed, either — it grows with
+  whatever workflow is selected: add `purchase_stock` once a warehouse is in
+  play (trading), or `mrp` (mrp), on top of this base set, in the same call.
+
+*Done when* `install-modules` has come back with `not_installed` empty, and
+every column of every CSV you are about to write has appeared in a `fields`
+output, with its type and — for selection fields — its allowed values copied
+verbatim.
 
 *Done when* `install-modules` has come back with `not_installed` empty, and
 every column of every CSV you are about to write has appeared in a `fields`
@@ -150,10 +159,16 @@ Import in **dependency order** so every reference resolves:
    with the selection values verbatim. Whether storability is one of those
    values or its own boolean flag varies by version.
 3. **stock on hand** — a *second pass over `product.template`*, one row per
-   product you marked storable, carrying just `id` (the same external id as
-   above) and `qty_available`. The ids already exist, so Odoo runs the same code
-   path as typing a quantity on the product form: it creates the quant and
-   applies it, and the goods really are on hand.
+   product you marked storable, repeating the **same `id` and every required
+   column from file 2** (`name`, `invoice_policy`, whatever else step 2's
+   `fields` probe marked `required`) plus `qty_available`. It's a second pass
+   over the same rows, not a sparser one: `import-csv` re-validates every
+   required field on each row it touches even though the record already
+   exists, so dropping a required column here fails the same way it would on
+   a brand-new row. Only the *optional* columns (`list_price`, `barcode`,
+   photos…) are safe to leave out. The ids already exist, so Odoo runs the
+   same code path as typing a quantity on the product form: it creates the
+   quant and applies it, and the goods really are on hand.
 4. **`crm.lead`** — columns: `id` (e.g. `lead_1`), `name`, `partner_id/id`
    (an id from file 1), `expected_revenue`, `description`, `stage_id` (`New`,
    `Qualified` or `Proposition`). Write every `description` in the **customer's
@@ -162,9 +177,21 @@ Import in **dependency order** so every reference resolves:
 
 Three rules bind every CSV:
 
-- **External IDs** — every row carries an `id` column and every reference is
-  `field_id/id` pointing at one. This is what makes a re-import update the
-  record instead of duplicating it, and it is non-negotiable.
+- **External IDs, but only between rows this run creates** — every row you
+  write carries an `id` column, and a reference to a record *from one of your
+  own CSVs* is `field_id/id` pointing at that column: `crm.lead`'s
+  `partner_id/id` holding `partner_client_1` from the `res.partner` file
+  above. That's what makes a re-import update the record instead of
+  duplicating it, and it's non-negotiable for those references. A `many2one`
+  pointing at something this run did *not* create — a category, a country, a
+  stage, a UoM — has no external id you know, and Odoo's importer resolves it
+  by the target's **display name** instead: `crm.lead`'s `stage_id` column
+  holds the literal text `New`, not an id, and a `product.template`'s
+  `categ_id` column (if you write one) holds `Goods`, the category's actual
+  name, not its database id or an external id. Get the kind wrong and the
+  import rejects the value outright — "No matching record found for external
+  id …" (a name written as `field_id/id`) or "for name …" (an id, or the
+  wrong spelling, written as a plain column) — see `ODOO-TRAPS.md`.
 - **Quoting** — comma separator, and every text value wrapped in double quotes
   so `"Company, Inc."` stays one column.
 - **Language** — the site's language, or the one the sales person asked for.
