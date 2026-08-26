@@ -95,6 +95,13 @@ feeder catches that itself and reports failure instead of "✔ Done!".
   method calls, CSV import, introspection).
 - **odoo-demo-csv/** — the `npx skills` package the agent follows to research a
   website and generate/import Odoo CSVs.
+- **odoo-demo-trading/**, **odoo-demo-mrp/**, **odoo-demo-accounting/**,
+  **odoo-demo-analytics/** + **odoo_crud_trading.py**, **odoo_crud_mrp.py**,
+  **odoo_crud_accounting.py**, **odoo_crud_analytics.py** — one skill and one
+  tool per `--workflows` option (see below). Each pair is only installed and
+  allowed for a run when its workflow is actually selected, so picking none of
+  them leaves the agent with just `odoo-crud`. **odoo_crud_lib.py** holds the
+  XML-RPC connection code all four tools share.
 
 ## Safety
 

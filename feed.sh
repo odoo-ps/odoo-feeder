@@ -480,6 +480,15 @@ mkdir -p "$BIN_DIR" "$DATA_DIR"
 [[ "$REPO_REF" != "main" ]] && ok "Using ref '$REPO_REF'"
 fetch_to "$RAW/odoo-demo-feeder" "$BIN_DIR/odoo-demo-feeder" || die "Could not download the feeder from $RAW."
 fetch_to "$RAW/odoo_crud.py"     "$DATA_DIR/odoo_crud.py"    || die "Could not download the CRUD tool from $RAW."
+# The per-workflow tools (only wired up at runtime if their workflow is
+# selected — see odoo-demo-feeder) and the connection plumbing they share.
+# Fetched unconditionally here since selection happens later, interactively;
+# they are small and cost nothing to have on disk unused.
+fetch_to "$RAW/odoo_crud_lib.py"        "$DATA_DIR/odoo_crud_lib.py"        || die "Could not download odoo_crud_lib.py from $RAW."
+fetch_to "$RAW/odoo_crud_trading.py"    "$DATA_DIR/odoo_crud_trading.py"    || die "Could not download odoo_crud_trading.py from $RAW."
+fetch_to "$RAW/odoo_crud_mrp.py"        "$DATA_DIR/odoo_crud_mrp.py"        || die "Could not download odoo_crud_mrp.py from $RAW."
+fetch_to "$RAW/odoo_crud_accounting.py" "$DATA_DIR/odoo_crud_accounting.py" || die "Could not download odoo_crud_accounting.py from $RAW."
+fetch_to "$RAW/odoo_crud_analytics.py"  "$DATA_DIR/odoo_crud_analytics.py"  || die "Could not download odoo_crud_analytics.py from $RAW."
 chmod +x "$BIN_DIR/odoo-demo-feeder"
 ok "Feeder ready at $BIN_DIR/odoo-demo-feeder"
 echo

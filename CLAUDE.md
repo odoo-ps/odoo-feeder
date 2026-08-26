@@ -20,6 +20,32 @@ skills.
 
 Touch one, check the other two.
 
+## Per-workflow skill + tool pairs
+
+Each `ODOO_FLOWS` key (`trading`, `mrp`, `accounting`, `analytics`) is its own
+triple, independent of the base one above and of each other: `odoo-demo-<flow>/
+SKILL.md`, `odoo_crud_<flow>.py`, and that tool's own argparse `--help`. Tweaking
+one flow's behaviour never touches `odoo-demo-csv`, `odoo_crud.py`, or another
+flow's files — that isolation is the whole point of the split. Same
+touch-one-check-the-others rule applies within a triple.
+
+All four tool scripts import `odoo_crud_lib.py` for the XML-RPC connection
+(auth, uid caching, retry-on-stale-uid) — the one thing genuinely shared
+between them. `odoo_crud.py` itself does **not** import it; it stays exactly as
+it was, on purpose, so it never gains a dependency on code written for a
+workflow that might not even be selected.
+
+`odoo-demo-feeder` only installs a flow's wrapper (`~/.local/bin/odoo-crud-
+<flow>`), only allows it in each provider's permission rules, and only copies
+its skill into the sandboxed workspace, when that flow's key is actually in
+`ODOO_FLOWS` for this run — see `flow_skill_name` / `flow_tool_path` /
+`flow_wrapper_name` and every call site that loops over `ODOO_FLOWS`. A
+workflow nobody picked leaves no trace in that run's sandbox.
+
+`CRUD_TOOL_TRADING` / `CRUD_TOOL_MRP` / `CRUD_TOOL_ACCOUNTING` /
+`CRUD_TOOL_ANALYTICS` are env-overridable the same way `CRUD_TOOL` is, for
+testing one flow's tool locally.
+
 ## A local skill edit does not reach a run
 
 Every run does `npx skills add "$SKILLS_REPO" --global --agent <id> --copy` from
@@ -40,11 +66,17 @@ file needs the same explicit fetch added, it will not "just" come along.
 does test a local CRUD tool. `REPO_REF` only affects what `feed.sh` downloads
 during bootstrap — it does not steer the skill refresh.
 
+`odoo-demo-feeder` also narrows the `--skill` flags passed to `npx skills add`
+to the base skill plus whichever `ODOO_FLOWS` were selected — it no longer
+pulls `--skill '*'`. A new flow skill needs no change there; it starts showing
+up automatically once a flow key routes to it in `flow_skill_name`.
+
 ## The agent's box
 
-Headless, inside bubblewrap, restricted to one command: an `odoo-crud` wrapper
-installed by the feeder. It has no shell, so a new capability for the agent is a
-new `odoo_crud.py` subcommand — never a shell one-liner in the prompt or skill.
+Headless, inside bubblewrap, restricted to `odoo-crud` plus one
+`odoo-crud-<flow>` wrapper per selected workflow (see above) — never more. It
+has no shell, so a new capability for the agent is a new subcommand on
+whichever tool it belongs to — never a shell one-liner in the prompt or skill.
 
 ## Verification
 
@@ -59,4 +91,6 @@ moment the change stands on its own. Several changes stacked up in the tree lose
 which one to revert.
 
 The three synced documents make one change look like three: an edit that spans
-`SKILL.md`, the `REQUEST` prompt and the argparse help is a single commit.
+`SKILL.md`, the `REQUEST` prompt and the argparse help is a single commit. Same
+for a per-workflow triple: a change to `odoo-demo-mrp/SKILL.md` and
+`odoo_crud_mrp.py`'s argparse help is one commit, not two.

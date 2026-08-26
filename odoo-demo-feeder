@@ -27,6 +27,17 @@ SKILLS_REPO="${SKILLS_REPO-odoo-ps/odoo-feeder#$REPO_REF}"
 BOOTSTRAP="bash <(curl -fsSL https://raw.githubusercontent.com/odoo-ps/odoo-feeder/main/feed.sh)"
 
 CRUD_TOOL="${CRUD_TOOL:-$HOME/.local/share/odoo-demo-feeder/odoo_crud.py}"
+# Per-workflow tools: each is a separate script (own commands, own file) so a
+# workflow's tool can be tweaked without touching odoo_crud.py or any other
+# workflow's tool — see CLAUDE.md. Every one only gets installed and allowed
+# for THIS run when its workflow key is actually selected (below), never
+# unconditionally. All share odoo_crud_lib.py for the XML-RPC plumbing, which
+# must sit alongside them on disk (Python resolves sibling imports from the
+# script's own directory).
+CRUD_TOOL_TRADING="${CRUD_TOOL_TRADING:-$HOME/.local/share/odoo-demo-feeder/odoo_crud_trading.py}"
+CRUD_TOOL_MRP="${CRUD_TOOL_MRP:-$HOME/.local/share/odoo-demo-feeder/odoo_crud_mrp.py}"
+CRUD_TOOL_ACCOUNTING="${CRUD_TOOL_ACCOUNTING:-$HOME/.local/share/odoo-demo-feeder/odoo_crud_accounting.py}"
+CRUD_TOOL_ANALYTICS="${CRUD_TOOL_ANALYTICS:-$HOME/.local/share/odoo-demo-feeder/odoo_crud_analytics.py}"
 # Which AI CLI drives the agent: "agy" (Antigravity, default), "copilot"
 # (GitHub Copilot CLI) or "claude" (Claude Code).
 AI_CLI="${AI_CLI:-agy}"
@@ -219,6 +230,28 @@ normalise_workflows() {
     done
     (IFS=','; printf '%s' "${out[*]:-}")
 }
+
+# flow_skill_name <key> — the odoo-demo-feeder skill directory for a workflow key.
+flow_skill_name() {
+    case "$1" in
+        trading)    printf 'odoo-demo-trading' ;;
+        mrp)        printf 'odoo-demo-mrp' ;;
+        accounting) printf 'odoo-demo-accounting' ;;
+        analytics)  printf 'odoo-demo-analytics' ;;
+    esac
+}
+# flow_tool_path <key> — this run's path to that workflow's own CRUD-style tool.
+flow_tool_path() {
+    case "$1" in
+        trading)    printf '%s' "$CRUD_TOOL_TRADING" ;;
+        mrp)        printf '%s' "$CRUD_TOOL_MRP" ;;
+        accounting) printf '%s' "$CRUD_TOOL_ACCOUNTING" ;;
+        analytics)  printf '%s' "$CRUD_TOOL_ANALYTICS" ;;
+    esac
+}
+# flow_wrapper_name <key> — the single-name wrapper binary installed for it,
+# same idea as odoo-crud itself: an exact name every permission rule matches.
+flow_wrapper_name() { printf 'odoo-crud-%s' "$1"; }
 
 # Validate an Odoo URL: must be http(s), and never the public odoo.com site.
 # Returns non-zero (and warns) when the URL is not acceptable.
@@ -763,7 +796,7 @@ else
 fi
 echo
 
-export ODOO_URL ODOO_LOGIN ODOO_SECRET ODOO_DB ODOO_SCOPE ODOO_SIZE COMPANY_NAME COMPANY_SITE
+export ODOO_URL ODOO_LOGIN ODOO_SECRET ODOO_DB ODOO_SCOPE ODOO_SIZE COMPANY_NAME COMPANY_SITE ODOO_FLOWS
 
 # --------------------------------------------------------------------------- #
 # Step 2 — make sure the skills are up to date
@@ -776,9 +809,21 @@ ui_header "Step 2/3 — Updating the AI skills..."
 # skills tool's registry (see provider_skill_agent) — installing under the
 # wrong agent id silently leaves this run's provider with no skill at all.
 SKILL_AGENT="$(provider_skill_agent)"
+# Only the base skill plus the skill for each SELECTED workflow — a workflow
+# nobody picked for this run has no business landing in the agent's skill
+# dir, global or sandboxed (see flow_skill_name).
+SKILL_NAMES=("odoo-demo-csv")
+if [[ -n "$ODOO_FLOWS" ]]; then
+    IFS=',' read -r -a FLOW_KEYS <<< "$ODOO_FLOWS"
+    for flow in "${FLOW_KEYS[@]}"; do
+        SKILL_NAMES+=("$(flow_skill_name "$flow")")
+    done
+fi
 if [[ -n "$SKILLS_REPO" ]] && command -v npx >/dev/null 2>&1; then
-    if npx -y skills add "$SKILLS_REPO" --global --agent "$SKILL_AGENT" --skill '*' --copy -y >/dev/null 2>&1; then
-        info "  ✔ Skills up to date ($SKILLS_REPO)"
+    SKILL_FLAGS=()
+    for name in "${SKILL_NAMES[@]}"; do SKILL_FLAGS+=(--skill "$name"); done
+    if npx -y skills add "$SKILLS_REPO" --global --agent "$SKILL_AGENT" "${SKILL_FLAGS[@]}" --copy -y >/dev/null 2>&1; then
+        info "  ✔ Skills up to date ($SKILLS_REPO): ${SKILL_NAMES[*]}"
     else
         warn "Could not refresh skills from $SKILLS_REPO — using the installed copy."
     fi
@@ -816,6 +861,31 @@ exit "\$status"
 CRUD
 chmod +x "$CRUD_WRAPPER"
 
+# One more single-name wrapper per SELECTED workflow (never for one that
+# wasn't picked) — same exact-name-match reasoning as odoo-crud itself.
+FLOW_WRAPPER_NAMES=()
+if [[ -n "$ODOO_FLOWS" ]]; then
+    IFS=',' read -r -a FLOW_KEYS <<< "$ODOO_FLOWS"
+    for flow in "${FLOW_KEYS[@]}"; do
+        tool_path="$(flow_tool_path "$flow")"
+        if [[ ! -f "$tool_path" ]]; then
+            warn "Workflow '$flow' selected but its tool is missing at $tool_path — skipping it."
+            continue
+        fi
+        wrapper_name="$(flow_wrapper_name "$flow")"
+        wrapper_path="$HOME/.local/bin/$wrapper_name"
+        cat > "$wrapper_path" <<CRUD
+#!/usr/bin/env bash
+python3 "$tool_path" "\$@"
+status=\$?
+[[ -n "\${ODOO_CRUD_AUDIT_LOG:-}" ]] && printf '%s %s exit=%s\n' "\$(date -u +%FT%TZ)" "\$*" "\$status" >> "\$ODOO_CRUD_AUDIT_LOG" 2>/dev/null
+exit "\$status"
+CRUD
+        chmod +x "$wrapper_path"
+        FLOW_WRAPPER_NAMES+=("$wrapper_name")
+    done
+fi
+
 case "$AI_CLI" in
 agy)
     # Merge our allow- and deny-rules into agy's global settings (preserving
@@ -827,6 +897,9 @@ agy)
     mkdir -p "$(dirname "$AI_SETTINGS")"
     ALLOW_RULES=()
     while IFS= read -r rule; do ALLOW_RULES+=("$rule"); done < <(provider_permission_allow_rules)
+    for wrapper_name in "${FLOW_WRAPPER_NAMES[@]}"; do
+        ALLOW_RULES+=("command($wrapper_name)" "unsandboxed($wrapper_name)")
+    done
     DENY_RULES=()
     while IFS= read -r rule; do DENY_RULES+=("$rule"); done < <(provider_permission_deny_rules)
     if python3 - "$AI_SETTINGS" "${#ALLOW_RULES[@]}" "${ALLOW_RULES[@]}" "${DENY_RULES[@]}" <<'PY'
@@ -855,7 +928,7 @@ with open(path, "w") as f:
     json.dump(data, f, indent=2)
 PY
     then
-        info "  ✔ Agent restricted to the 'odoo-crud' tool"
+        info "  ✔ Agent restricted to 'odoo-crud'${FLOW_WRAPPER_NAMES:+ and ${FLOW_WRAPPER_NAMES[*]}}"
     else
         warn "Could not write $AI_BIN permissions; the run may prompt for approvals."
     fi
@@ -863,8 +936,8 @@ PY
 copilot|claude)
     # Neither takes a persistent allowlist file — tool restriction is applied
     # per-invocation (--allow-tool for copilot, --allowed-tools/--disallowed-tools
-    # for claude) in the launcher below.
-    info "  ✔ Agent will be restricted to the 'odoo-crud' tool at launch"
+    # for claude) in the launcher below, reading ODOO_FLOWS (exported above).
+    info "  ✔ Agent will be restricted to 'odoo-crud'${FLOW_WRAPPER_NAMES:+ and ${FLOW_WRAPPER_NAMES[*]}} at launch"
     ;;
 esac
 echo
@@ -935,32 +1008,64 @@ fi
 ${INTAKE_DESC}
 "
 
-# The workflow options, expanded from keys into what each one has to produce.
+# The workflow options, expanded from keys into which skill/tool pair covers
+# each one. Each is its own skill (only present in the workspace because it
+# was selected — see Step 2) plus its own odoo-crud-<flow> tool; naming both
+# here is what gets the agent to actually load and follow them, on top of the
+# always-loaded odoo-demo-csv run.
 WORKFLOW_DESC=""
 if [[ -n "$ODOO_FLOWS" ]]; then
     WORKFLOW_DESC="
-These end-to-end flows must work in the finished database, built on top of the
-records the skill's run creates:"
+These end-to-end flows must also work in the finished database, each layered on
+top of the records odoo-demo-csv's run already created. Follow each one's own
+skill, using its own tool — never invent the steps from the flow name alone:"
     IFS=',' read -r -a WF_KEYS <<< "$ODOO_FLOWS"
     for wf in "${WF_KEYS[@]}"; do
         case "$wf" in
             trading) WORKFLOW_DESC+="
-  • Sales & purchasing: confirmed sale orders that raise the purchase order to
-    the vendor, with the customer invoice and vendor bill created and linked
-    back to their order." ;;
+  • Sales & purchasing — follow the 'odoo-demo-trading' skill, using the
+    'odoo-crud-trading' tool. A confirmed sale order raises the purchase order
+    to the vendor, with the customer invoice and vendor bill created and
+    linked back to their order." ;;
             mrp) WORKFLOW_DESC+="
-  • Manufacturing: bills of materials linking components to finished goods, and
-    a confirmed sale order that triggers a manufacturing order plus the
-    purchase order for its components." ;;
+  • Manufacturing — follow the 'odoo-demo-mrp' skill, using the 'odoo-crud-mrp'
+    tool. Bills of materials link components to finished goods, and a
+    confirmed sale order triggers a manufacturing order plus the purchase
+    order for its components." ;;
             accounting) WORKFLOW_DESC+="
-  • Invoicing: post those customer invoices and vendor bills, so the P&L,
-    balance sheet and cashflow reports are populated rather than empty." ;;
+  • Invoicing — follow the 'odoo-demo-accounting' skill, using the
+    'odoo-crud-accounting' tool. Post those customer invoices and vendor
+    bills, so the P&L, balance sheet and cashflow reports are populated
+    rather than empty." ;;
             analytics) WORKFLOW_DESC+="
-  • Analytics: date the orders and invoices across a rolling 90-day window, so
-    the trend charts show a line instead of a single spike." ;;
+  • Analytics — follow the 'odoo-demo-analytics' skill, using the
+    'odoo-crud-analytics' tool. Date the orders and invoices across a rolling
+    90-day window, so the trend charts show a line instead of a single spike." ;;
         esac
     done
     WORKFLOW_DESC+="
+"
+fi
+
+# Name each selected workflow's own tool alongside odoo-crud, since it is
+# equally permitted (see the wrapper install in Step 2) but never mentioned
+# where the skill talks about 'odoo-crud' itself.
+EXTRA_TOOLS_DESC=""
+EXTRA_TOOLS_PLURAL=""
+THESE_ARE="This is "
+if [[ -n "$ODOO_FLOWS" ]]; then
+    IFS=',' read -r -a WF_KEYS <<< "$ODOO_FLOWS"
+    for wf in "${WF_KEYS[@]}"; do
+        case "$wf" in
+            trading|mrp|accounting|analytics)
+                EXTRA_TOOLS_DESC+="
+    odoo-crud-${wf} <command> [options]"
+                EXTRA_TOOLS_PLURAL="s"
+                THESE_ARE="These are "
+                ;;
+        esac
+    done
+    [[ -z "$EXTRA_TOOLS_DESC" ]] || EXTRA_TOOLS_DESC+="
 "
 fi
 
@@ -971,14 +1076,14 @@ narrate it.
 
 ${SIZE_DIRECTIVE}${TARGET_DESC}${INTAKE_DESC}${WORKFLOW_DESC}
 
-Wherever the skill says 'odoo-crud', run:
+Wherever a skill says 'odoo-crud', run:
 
     odoo-crud <command> [options]
-
-This is the ONLY shell command you are permitted to run — everything else is
-blocked. It reads the database credentials from environment variables, so never
-ask for them, and 'odoo-crud <command> --help' documents every command and flag.
-Write your CSV files in the current directory.
+${EXTRA_TOOLS_DESC}
+${THESE_ARE}the ONLY shell command${EXTRA_TOOLS_PLURAL} you are permitted to
+run — everything else is blocked. Each reads the database credentials from
+environment variables, so never ask for them, and '<command> --help' documents
+every command and flag. Write your CSV files in the current directory.
 
 Finish by printing one line, in plain text with no markdown formatting (no
 bullets, bold, or headers), that starts with exactly 'SUMMARY:' describing what
@@ -1072,20 +1177,24 @@ with open(path, "w") as f:
 PY
 fi
 
-# Make the skill visible as a WORKSPACE skill (.agents/skills and .claude/skills
-# under the working dir) regardless of which global dir the skills CLI used for
-# the AI_CLI in question (see provider_skill_agent). $WORK is the agent's
-# --chdir root. Copy only this skill's own directory, not the whole source
-# tree — $HOME/.claude/skills in particular is the user's personal, global
-# Claude Code skill collection (their own project-specific skills), and a
-# wholesale copy would leak all of it into the sandboxed agent.
+# Make the skill(s) visible as a WORKSPACE skill (.agents/skills and
+# .claude/skills under the working dir) regardless of which global dir the
+# skills CLI used for the AI_CLI in question (see provider_skill_agent). $WORK
+# is the agent's --chdir root. Copy only SKILL_NAMES (base + the workflows
+# actually SELECTED for this run, see above) — never the whole source tree:
+# $HOME/.claude/skills in particular is the user's personal, global Claude
+# Code skill collection (their own project-specific skills), and a wholesale
+# copy would leak all of it into the sandboxed agent, and a workflow nobody
+# picked has no business in the workspace either.
 mkdir -p "$WORK/.agents/skills" "$WORK/.claude/skills"
-for src in "$HOME/.agents/skills/odoo-demo-csv" "$HOME/.gemini/antigravity/skills/odoo-demo-csv" "$HOME/.claude/skills/odoo-demo-csv"; do
-    if [[ -d "$src" ]]; then
-        cp -r "$src" "$WORK/.agents/skills/" 2>/dev/null || true
-        # Make skills visible to Claude Code as project-scoped skills
-        cp -r "$src" "$WORK/.claude/skills/" 2>/dev/null || true
-    fi
+for skill_name in "${SKILL_NAMES[@]}"; do
+    for src in "$HOME/.agents/skills/$skill_name" "$HOME/.gemini/antigravity/skills/$skill_name" "$HOME/.claude/skills/$skill_name"; do
+        if [[ -d "$src" ]]; then
+            cp -r "$src" "$WORK/.agents/skills/" 2>/dev/null || true
+            # Make skills visible to Claude Code as project-scoped skills
+            cp -r "$src" "$WORK/.claude/skills/" 2>/dev/null || true
+        fi
+    done
 done
 
 # Generate a self-contained launcher inside the scratch dir. It runs agy inside an
@@ -1152,8 +1261,23 @@ export ODOO_CRUD_AUDIT_LOG="$HERE/.odoo-crud-calls.log"
 # -p mode, and also closes off a locally saved bypassPermissions/acceptEdits
 # default from silently widening what runs unattended. Same as the other
 # providers, bwrap / Seatbelt remains the hard backstop underneath.
+# Wrapper names for whichever workflows are SELECTED this run (ODOO_FLOWS is
+# exported by the launcher above) — mirrors flow_wrapper_name() there. Each
+# only gets allowed here when its workflow was actually picked, same as the
+# wrapper itself only gets installed then.
+flow_wrapper_names() {
+    local flow
+    IFS=',' read -r -a _flows <<< "${ODOO_FLOWS:-}"
+    for flow in "${_flows[@]}"; do
+        case "$flow" in
+            trading|mrp|accounting|analytics) printf 'odoo-crud-%s\n' "$flow" ;;
+        esac
+    done
+}
+
 build_ai_argv() {
     local mode="${MODE:-batch}" request; request="$(cat "$HERE/request.txt")"
+    local wrapper
     case "$AI_CLI" in
         agy)
             if [[ "$mode" == "interactive" ]]; then
@@ -1164,6 +1288,7 @@ build_ai_argv() {
             ;;
         copilot)
             local tools='shell(odoo-crud),read,write,web_fetch,web_search'
+            while IFS= read -r wrapper; do tools+=",shell($wrapper)"; done < <(flow_wrapper_names)
             if [[ "$mode" == "interactive" ]]; then
                 AI_ARGV=("$AI_BIN" --model "$AI_MODEL" --allow-tool="$tools" --allow-all-urls -i "$request")
             else
@@ -1174,6 +1299,7 @@ build_ai_argv() {
             ;;
         claude)
             local allowed=("Bash(odoo-crud:*)" "Read" "Write" "Edit" "WebFetch" "WebSearch")
+            while IFS= read -r wrapper; do allowed+=("Bash($wrapper:*)"); done < <(flow_wrapper_names)
             if [[ "$mode" == "interactive" ]]; then
                 AI_ARGV=("$AI_BIN" "$request" --model "$AI_MODEL" --permission-mode dontAsk \
                     --allowed-tools "${allowed[@]}" --disallowed-tools "mcp__*")
@@ -1417,12 +1543,15 @@ check_real_writes_happened() {
         warn "    using --openrouter-model, try a different (typically larger) model."
         return 1
     fi
-    if ! grep -qE '\b(create|write|unlink|import-csv|set-image|call)\b.*exit=0$' "$AUDIT_LOG"; then
+    # Includes the write-shaped subcommands of the per-workflow tools
+    # (confirm-so/invoice-so, confirm/create-bom, post, spread-dates) — a run
+    # that only touched the database through one of those still counts.
+    if ! grep -qE '\b(create|write|unlink|import-csv|set-image|call|confirm-so|invoice-so|confirm|create-bom|post|spread-dates)\b.*exit=0$' "$AUDIT_LOG"; then
         warn "odoo-crud never completed a write during this run (see $AUDIT_LOG)."
-        warn "  → Either no create/write/unlink/import-csv/set-image/call was ever made, or"
-        warn "    every one of them failed (nonzero exit) — the database was not actually"
-        warn "    modified despite the summary below. Check the log above for the real error"
-        warn "    each failed call returned, then retry."
+        warn "  → Either no create/write/unlink/import-csv/set-image/call (or workflow-tool"
+        warn "    equivalent) was ever made, or every one of them failed (nonzero exit) — the"
+        warn "    database was not actually modified despite the summary below. Check the log"
+        warn "    above for the real error each failed call returned, then retry."
         return 1
     fi
     return 0
