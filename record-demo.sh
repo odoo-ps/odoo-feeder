@@ -464,6 +464,12 @@ TAPE
         type_raw "  $FEED_ARGS"; printf 'Sleep 1200ms\nEnter\n'
     fi
 
+    # feed.sh opens on its own dependency check, before anything is asked.
+    # Waiting for it (or for whatever is already past it — the alternatives are
+    # what keep this from ever hanging) holds the film there long enough to read.
+    printf '\nWait+Screen /Checking dependencies|Which AI CLI|Odoo URL|Step 1.3/\n'
+    printf 'Sleep 2500ms\n'
+
     # ----- the prompts, each one waited for by its own text ----------------- #
     if [[ "$AI_FLAG" -eq 0 ]]; then
         # feed.sh — "Which AI CLI should drive the agent?" (agy, copilot, claude)
