@@ -69,6 +69,7 @@ THEME="Dracula"
 TYPING_SPEED="55ms"
 FRAMERATE=24
 WAIT_TIMEOUT="6m"                       # per-prompt patience (npx/npm can be slow)
+WARMUP_SECONDS=60                       # unattended Steps 2/3 before the tail
 TAIL_SECONDS=60                         # how much of the agent's TUI to film
 QUIT_KEYS="ctrl-c"                      # ctrl-c | none
 KEEP_TAPE=0
@@ -112,6 +113,9 @@ record-demo.sh — record a GIF of 'bash <(wget -qO- .../feed.sh) -i'
   --site/--website   customer website          (default: skipped)
   --extra/--notes    "Anything else..." note   (default: "$EXTRA")
   --tail SECONDS     seconds of the agent's TUI to film (default: $TAIL_SECONDS)
+  --warmup SECONDS   seconds to let Steps 2/3 run before the tail starts
+                     (default: $WARMUP_SECONDS) — the skills install and the
+                     agent's own boot, which nothing on screen announces
   --quit-keys MODE   ctrl-c|none — how to end the recorded session
   --width / --height / --font-size / --theme / --typing-speed
   --skip-check       do not verify the credentials before recording
@@ -144,6 +148,7 @@ while [[ $# -gt 0 ]]; do
         --ai-flag)      AI_FLAG=1; shift ;;
         --show-secret)  SHOW_SECRET=1; shift ;;
         --tail)         TAIL_SECONDS="$2"; shift 2 ;;
+        --warmup)       WARMUP_SECONDS="$2"; shift 2 ;;
         --quit-keys)    QUIT_KEYS="$2"; shift 2 ;;
         --width)        WIDTH="$2"; shift 2 ;;
         --height)       HEIGHT="$2"; shift 2 ;;
@@ -505,7 +510,15 @@ TAPE
     fi
 
     # Steps 2 and 3 run unattended; film the agent for a while, then leave.
-    printf '\nWait+Screen /Step 3.3/\nSleep %ss\n' "$TAIL_SECONDS"
+    #
+    # Anchored on Step 2's header, not Step 3's: Step 2 stays on screen for the
+    # whole (quiet) skills install, while the agent's TUI clears the screen a
+    # frame or two after Step 3 prints — a Wait on Step 3 can miss it outright
+    # and then burn the entire WaitTimeout before killing a finished take. The
+    # alternatives cover a take that only gets here once the agent is up.
+    printf '\nWait+Screen /Step 2.3|Updating the AI skills|Step 3.3|Populating the database/\n'
+    printf 'Sleep %ss\n' "$WARMUP_SECONDS"
+    printf 'Sleep %ss\n' "$TAIL_SECONDS"
     if [[ "$QUIT_KEYS" == "ctrl-c" ]]; then
         cat <<'TAPE'
 Ctrl+C
