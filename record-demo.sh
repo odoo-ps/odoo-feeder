@@ -29,8 +29,19 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # --------------------------------------------------------------------------- #
 OUT="demo.gif"
 MP4=""                                  # --mp4 FILE (optional second output)
-CMD_URL="https://raw.githubusercontent.com/odoo-ps/odoo-feeder/main/feed.sh"
+REF="main"                              # --ref: git ref to bootstrap from
 FEED_ARGS="-i"
+
+# Which film to make. The feeder's own flags decide how much there is to see:
+#   prompts — the recorded command line is bare, every value below is TYPED
+#             into the real prompt. This is the interactive tour.
+#   flags   — the recorded command line carries the flags (your example). Any
+#             value flag sets GAVE_ARGS=1 in the feeder, which skips the
+#             template chooser and all the optional prompts, so the film is the
+#             command plus Steps 2/3. Short, and nothing to type.
+MODE="prompts"
+SHOW_SECRET=0                           # flags mode: put --secret on screen
+AI_FLAG=0                               # pass --ai-cli instead of filming the chooser
 
 AI_CHOICE="${AI_CHOICE:-claude}"        # agy | copilot | claude (the first chooser)
 ODOO_URL="${ODOO_URL:-}"
@@ -75,6 +86,15 @@ usage() {
     cat <<USAGE
 record-demo.sh — record a GIF of 'bash <(wget -qO- .../feed.sh) -i'
 
+  --mode MODE        prompts|flags (default: $MODE)
+                     prompts: bare command line, answers typed into the prompts
+                     flags:   the feeder's own flags on the command line, which
+                              makes it skip those prompts entirely
+  --ref REF          git ref to bootstrap from (default: $REF) — pins both the
+                     raw URL and REPO_REF, as in REPO_REF=199ca21 bash <(...)
+  --ai-flag          pass --ai-cli instead of filming the CLI chooser
+  --show-secret      flags mode: put --secret on the visible command line
+                     (default: passed through the environment, off screen)
   --out FILE         GIF to write (default: $OUT)
   --mp4 FILE         also write an mp4 (needs ffmpeg)
   --ai CLI           which CLI to pick in the first chooser: agy|copilot|claude
@@ -87,8 +107,8 @@ record-demo.sh — record a GIF of 'bash <(wget -qO- .../feed.sh) -i'
   --scope TEXT       scope / industry          (default: $SCOPE)
   --size SIZE        small|medium|big          (default: $SIZE)
   --company NAME     customer company name     (default: skipped)
-  --site URL         customer website          (default: skipped)
-  --extra TEXT       "Anything else..." note   (default: "$EXTRA")
+  --site/--website   customer website          (default: skipped)
+  --extra/--notes    "Anything else..." note   (default: "$EXTRA")
   --tail SECONDS     seconds of the agent's TUI to film (default: $TAIL_SECONDS)
   --quit-keys MODE   ctrl-c|none — how to end the recorded session
   --width / --height / --font-size / --theme / --typing-speed
@@ -110,13 +130,17 @@ while [[ $# -gt 0 ]]; do
         --url)          ODOO_URL="$2"; shift 2 ;;
         --login)        ODOO_LOGIN="$2"; shift 2 ;;
         --secret)       ODOO_SECRET="$2"; shift 2 ;;
-        --db)           ODOO_DB="$2"; DB_PROMPT="yes"; shift 2 ;;
+        --db)           ODOO_DB="$2"; shift 2 ;;
         --db-prompt)    DB_PROMPT="$2"; shift 2 ;;
         --scope)        SCOPE="$2"; shift 2 ;;
         --size)         SIZE="$2"; shift 2 ;;
         --company)      COMPANY="$2"; shift 2 ;;
-        --site)         SITE="$2"; shift 2 ;;
-        --extra)        EXTRA="$2"; shift 2 ;;
+        --site|--website) SITE="$2"; shift 2 ;;
+        --extra|--notes)  EXTRA="$2"; shift 2 ;;
+        --mode)         MODE="$2"; shift 2 ;;
+        --ref|--repo-ref) REF="$2"; shift 2 ;;
+        --ai-flag)      AI_FLAG=1; shift ;;
+        --show-secret)  SHOW_SECRET=1; shift ;;
         --tail)         TAIL_SECONDS="$2"; shift 2 ;;
         --quit-keys)    QUIT_KEYS="$2"; shift 2 ;;
         --width)        WIDTH="$2"; shift 2 ;;
@@ -136,6 +160,11 @@ done
 case "$AI_CHOICE" in agy|copilot|claude) ;; *) die "--ai must be agy, copilot or claude." ;; esac
 case "$SIZE"      in small|medium|big)   ;; *) die "--size must be small, medium or big." ;; esac
 case "$DB_PROMPT" in auto|yes|no)        ;; *) die "--db-prompt must be auto, yes or no." ;; esac
+case "$MODE"      in prompts|flags)      ;; *) die "--mode must be prompts or flags." ;; esac
+# In flags mode nothing is typed into a prompt, so the CLI has to come from the
+# flag — there is no chooser to film.
+[[ "$MODE" == "flags" ]] && AI_FLAG=1
+CMD_URL="https://raw.githubusercontent.com/odoo-ps/odoo-feeder/${REF}/feed.sh"
 
 # --------------------------------------------------------------------------- #
 # Dependencies: vhs drives the terminal, ttyd is the terminal it drives, ffmpeg
@@ -263,22 +292,36 @@ fi
 CRUD_TOOL="${CRUD_TOOL:-$HERE/odoo_crud.py}"
 [[ -f "$CRUD_TOOL" ]] || CRUD_TOOL="$HOME/.local/share/odoo-demo-feeder/odoo_crud.py"
 
+auth_check() {  # auth_check <db>  -> prints the JSON, exit status is the check's
+    ODOO_URL="$ODOO_URL" ODOO_LOGIN="$ODOO_LOGIN" ODOO_SECRET="$ODOO_SECRET" \
+    ODOO_DB="${1:-}" python3 "$CRUD_TOOL" auth-check 2>&1
+}
+json_get() { python3 -c "import sys, json; print(json.load(sys.stdin).get('result', {}).get('$1', ''))" 2>/dev/null || true; }
+
 if [[ "$SKIP_CHECK" -eq 0 && "$DRY_RUN" -eq 0 ]]; then
     step "Verifying the database (so the take is not wasted)"
     if [[ -f "$CRUD_TOOL" ]] && command -v python3 >/dev/null 2>&1; then
-        set +e
-        AUTH_OUT=$(ODOO_URL="$ODOO_URL" ODOO_LOGIN="$ODOO_LOGIN" ODOO_SECRET="$ODOO_SECRET" \
-                   ODOO_DB="$ODOO_DB" python3 "$CRUD_TOOL" auth-check 2>&1)
-        AUTH_STATUS=$?
-        set -e
-        [[ $AUTH_STATUS -eq 0 ]] || die "auth-check failed — fix this before recording:
+        # First check with no database name at all — exactly the state the
+        # feeder is in before it decides whether to ask for one.
+        set +e; AUTH_OUT="$(auth_check '')"; AUTH_STATUS=$?; set -e
+        if [[ $AUTH_STATUS -eq 0 ]]; then
+            DETECTED_DB="$(printf '%s' "$AUTH_OUT" | json_get database)"
+            ok "connection works${DETECTED_DB:+ (auto-detected database: $DETECTED_DB)}"
+            [[ "$DB_PROMPT" == "auto" ]] && { [[ -n "$DETECTED_DB" ]] && DB_PROMPT="no" || DB_PROMPT="yes"; }
+            if [[ -n "$ODOO_DB" && -n "$DETECTED_DB" && "$ODOO_DB" != "$DETECTED_DB" && "$MODE" == "prompts" ]]; then
+                warn "--db $ODOO_DB will never be typed: the feeder auto-detects '$DETECTED_DB' and skips that prompt."
+            fi
+        elif [[ -n "$ODOO_DB" ]]; then
+            # Auto-detection failed (localhost / multi-db), so the feeder will
+            # ask — verify the name that the tape is going to type.
+            set +e; AUTH_OUT="$(auth_check "$ODOO_DB")"; AUTH_STATUS=$?; set -e
+            [[ $AUTH_STATUS -eq 0 ]] || die "auth-check failed for database '$ODOO_DB' — fix this before recording:
 $AUTH_OUT"
-        DETECTED_DB=$(printf '%s' "$AUTH_OUT" \
-            | python3 -c "import sys, json; print(json.load(sys.stdin).get('result', {}).get('database', ''))" 2>/dev/null || true)
-        ok "connection works${DETECTED_DB:+ (database: $DETECTED_DB)}"
-        if [[ "$DB_PROMPT" == "auto" ]]; then
-            if [[ -n "$ODOO_DB" || -n "$DETECTED_DB" ]]; then DB_PROMPT="no"; else DB_PROMPT="yes"; fi
-            ok "the feeder will $([[ "$DB_PROMPT" == yes ]] && echo 'ask' || echo 'not ask') for a database name"
+            ok "connection works with database '$ODOO_DB' (not auto-detected, so it will be asked for)"
+            [[ "$DB_PROMPT" == "auto" ]] && DB_PROMPT="yes"
+        else
+            die "auth-check failed — fix this before recording (or pass --db):
+$AUTH_OUT"
         fi
     else
         warn "odoo_crud.py not found — skipping the check (set CRUD_TOOL to point at it)"
@@ -291,6 +334,8 @@ if [[ "$DB_PROMPT" == "auto" ]]; then
         *)           DB_PROMPT="yes" ;;
     esac
 fi
+# Flags mode answers no prompts at all.
+[[ "$MODE" == "flags" ]] && DB_PROMPT="no"
 
 # --------------------------------------------------------------------------- #
 # The tape. Every answer is preceded by a Wait+Screen on the prompt's own text:
@@ -322,6 +367,10 @@ answer() {  # answer <value>
     fi
 }
 
+# A vhs `Type` argument delimited by backticks: the command lines carry double
+# quotes and backslashes, which the "..." form would try to interpret.
+type_raw() { printf 'Type `%s`\n' "$1"; }
+
 {
     printf 'Output %s\n' "$OUT"
     [[ -n "$MP4" ]] && printf 'Output %s\n' "$MP4"
@@ -349,47 +398,81 @@ Show
 Sleep 1500ms
 TAPE
 
-    printf '\nType "bash <(wget -qO- %s) %s"\nSleep 1200ms\nEnter\n' "$CMD_URL" "$FEED_ARGS"
+    # ----- the command line itself ----------------------------------------- #
+    prefix=""
+    [[ "$REF" != "main" ]] && prefix="REPO_REF=$REF "
+    boot="${prefix}bash <(wget -qO- $CMD_URL)"
 
-    # feed.sh — "Which AI CLI should drive the agent?" (agy, copilot, claude)
-    case "$AI_CHOICE" in agy) n=0 ;; copilot) n=1 ;; claude) n=2 ;; esac
-    printf '\nWait+Screen /Which AI CLI/\nSleep 1500ms\n'
-    downs "$n"
-    printf 'Enter\n'
-
-    # odoo-demo-feeder Step 1 — connection details.
-    printf '\nWait+Screen /Odoo URL/\nSleep 1200ms\n'
-    answer "$ODOO_URL"
-    printf '\nWait+Screen /Login .email or user./\nSleep 800ms\n'
-    answer "$ODOO_LOGIN"
-    printf '\nWait+Screen /API key or password/\nSleep 800ms\n'
-    answer "$ODOO_SECRET"
-
-    # Content — template or scratch (scratch is the second entry).
-    printf '\nWait+Screen /template or start from scratch/\nSleep 1500ms\n'
-    downs 1
-    printf 'Enter\n'
-
-    printf '\nWait+Screen /Scope . industry/\nSleep 1000ms\n'
-    answer "$SCOPE"
-
-    if [[ "$DB_PROMPT" == "yes" ]]; then
-        printf '\nWait+Screen /Database name/\nSleep 900ms\n'
-        answer "$ODOO_DB"
+    if [[ "$MODE" == "prompts" ]]; then
+        line="$boot"
+        [[ "$AI_FLAG" -eq 1 ]] && line="$line --ai-cli $AI_CHOICE"
+        printf '\n'; type_raw "$line $FEED_ARGS"
+        printf 'Sleep 1200ms\nEnter\n'
+    else
+        # One flag per line, continued with a backslash, as you would type it.
+        printf '\n'; type_raw "$boot \\"; printf 'Enter\nSleep 300ms\n'
+        flags=(--ai-cli "$AI_CHOICE" --url "$ODOO_URL" --login "$ODOO_LOGIN")
+        [[ "$SHOW_SECRET" -eq 1 ]] && flags+=(--secret "$ODOO_SECRET")
+        [[ -n "$ODOO_DB" ]]  && flags+=(--db "$ODOO_DB")
+        flags+=(--scope "$SCOPE" --size "$SIZE")
+        [[ -n "$COMPANY" ]]  && flags+=(--company "$COMPANY")
+        [[ -n "$SITE" ]]     && flags+=(--website "$SITE")
+        [[ -n "$EXTRA" ]]    && flags+=(--notes "$EXTRA")
+        i=0
+        while (( i < ${#flags[@]} )); do
+            # Quote the value only when it needs it, so the film reads naturally.
+            val="${flags[i+1]}"
+            case "$val" in *[[:space:]]*) val="\"$val\"" ;; esac
+            type_raw "  ${flags[i]} $val \\"; printf 'Enter\nSleep 250ms\n'
+            i=$((i+2))
+        done
+        type_raw "  $FEED_ARGS"; printf 'Sleep 1200ms\nEnter\n'
     fi
 
-    # Dataset size — gum chooser, small first.
-    case "$SIZE" in small) n=0 ;; medium) n=1 ;; big) n=2 ;; esac
-    printf '\nWait+Screen /Dataset size/\nSleep 1200ms\n'
-    downs "$n"
-    printf 'Enter\n'
+    # ----- the prompts, each one waited for by its own text ----------------- #
+    if [[ "$AI_FLAG" -eq 0 ]]; then
+        # feed.sh — "Which AI CLI should drive the agent?" (agy, copilot, claude)
+        case "$AI_CHOICE" in agy) n=0 ;; copilot) n=1 ;; claude) n=2 ;; esac
+        printf '\nWait+Screen /Which AI CLI/\nSleep 1500ms\n'
+        downs "$n"
+        printf 'Enter\n'
+    fi
 
-    printf '\nWait+Screen /Customer company name/\nSleep 900ms\n'
-    answer "$COMPANY"
-    printf '\nWait+Screen /Customer website/\nSleep 900ms\n'
-    answer "$SITE"
-    printf '\nWait+Screen /Anything else/\nSleep 900ms\n'
-    answer "$EXTRA"
+    if [[ "$MODE" == "prompts" ]]; then
+        # Step 1 — connection details.
+        printf '\nWait+Screen /Odoo URL/\nSleep 1200ms\n'
+        answer "$ODOO_URL"
+        printf '\nWait+Screen /Login .email or user./\nSleep 800ms\n'
+        answer "$ODOO_LOGIN"
+        printf '\nWait+Screen /API key or password/\nSleep 800ms\n'
+        answer "$ODOO_SECRET"
+
+        # Content — template or scratch (scratch is the second entry).
+        printf '\nWait+Screen /template or start from scratch/\nSleep 1500ms\n'
+        downs 1
+        printf 'Enter\n'
+
+        printf '\nWait+Screen /Scope . industry/\nSleep 1000ms\n'
+        answer "$SCOPE"
+
+        [[ "$DB_PROMPT" == "yes" ]] && {
+            printf '\nWait+Screen /Database name/\nSleep 900ms\n'
+            answer "$ODOO_DB"
+        }
+
+        # Dataset size — gum chooser, small first.
+        case "$SIZE" in small) n=0 ;; medium) n=1 ;; big) n=2 ;; esac
+        printf '\nWait+Screen /Dataset size/\nSleep 1200ms\n'
+        downs "$n"
+        printf 'Enter\n'
+
+        printf '\nWait+Screen /Customer company name/\nSleep 900ms\n'
+        answer "$COMPANY"
+        printf '\nWait+Screen /Customer website/\nSleep 900ms\n'
+        answer "$SITE"
+        printf '\nWait+Screen /Anything else/\nSleep 900ms\n'
+        answer "$EXTRA"
+    fi
 
     # Steps 2 and 3 run unattended; film the agent for a while, then leave.
     printf '\nWait+Screen /Step 3.3/\nSleep %ss\n' "$TAIL_SECONDS"
@@ -421,12 +504,19 @@ vhs validate "$TAPE" >/dev/null 2>&1 || die "vhs rejected the generated tape:
 $(vhs validate "$TAPE" 2>&1 | head -20)"
 
 step "Recording → $OUT"
-printf '%s\n' "${DIM}  answers: ai=$AI_CHOICE scope=$SCOPE size=$SIZE db-prompt=$DB_PROMPT tail=${TAIL_SECONDS}s${RESET}"
-env -u ODOO_URL -u ODOO_LOGIN -u ODOO_SECRET -u ODOO_DB -u ODOO_SCOPE \
-    -u ODOO_SIZE -u COMPANY_NAME -u COMPANY_SITE -u EXTRA \
-    -u TEMPLATE_FILE -u TEMPLATE_TEXT -u AI_CLI \
-    ASSUME_SIGNED_IN="${ASSUME_SIGNED_IN:-1}" \
-    vhs "$TAPE"
+printf '%s\n' "${DIM}  mode=$MODE ref=$REF ai=$AI_CHOICE scope=$SCOPE size=$SIZE db-prompt=$DB_PROMPT tail=${TAIL_SECONDS}s${RESET}"
+RECORD_ENV=(env -u ODOO_URL -u ODOO_LOGIN -u ODOO_DB -u ODOO_SCOPE
+            -u ODOO_SIZE -u COMPANY_NAME -u COMPANY_SITE -u EXTRA
+            -u TEMPLATE_FILE -u TEMPLATE_TEXT -u AI_CLI
+            ASSUME_SIGNED_IN="${ASSUME_SIGNED_IN:-1}")
+# flags mode without --show-secret: hand the key to the feeder through the
+# environment instead of typing it where the camera can see it.
+if [[ "$MODE" == "flags" && "$SHOW_SECRET" -eq 0 ]]; then
+    RECORD_ENV+=(ODOO_SECRET="$ODOO_SECRET")
+else
+    RECORD_ENV=("${RECORD_ENV[@]:0:1}" -u ODOO_SECRET "${RECORD_ENV[@]:1}")
+fi
+"${RECORD_ENV[@]}" vhs "$TAPE"
 
 ok "$OUT ($(du -h "$OUT" | cut -f1))"
 [[ -n "$MP4" ]] && ok "$MP4 ($(du -h "$MP4" | cut -f1))"
