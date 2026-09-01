@@ -102,7 +102,9 @@ record-demo.sh — record a GIF of 'bash <(wget -qO- .../feed.sh) -i'
   --url URL          Odoo URL to type          (env ODOO_URL)
   --login LOGIN      login to type             (env ODOO_LOGIN)
   --secret SECRET    API key / password        (env ODOO_SECRET)
-  --db NAME          database name to type; implies --db-prompt yes
+  --db NAME          database name to type when the feeder asks for one
+                     (default: the URL's own subdomain, which is the database
+                     name on *.odoo.com — so SaaS never needs this flag)
   --db-prompt MODE   auto|yes|no — whether the feeder will ask for a database
   --scope TEXT       scope / industry          (default: $SCOPE)
   --size SIZE        small|medium|big          (default: $SIZE)
@@ -292,6 +294,22 @@ fi
 CRUD_TOOL="${CRUD_TOOL:-$HERE/odoo_crud.py}"
 [[ -f "$CRUD_TOOL" ]] || CRUD_TOOL="$HOME/.local/share/odoo-demo-feeder/odoo_crud.py"
 
+# SaaS runs one database per subdomain, and odoo_crud.py falls back to exactly
+# this name when ODOO_DB is empty. Deriving it here as well is what keeps --db
+# optional: whatever the check has to be retried with, and whatever the tape
+# types if the feeder does ask, comes from the URL when no --db was given.
+url_db() {  # url_db <url> -> the host's first label, empty when it implies none
+    local host="${1#*://}"; host="${host%%/*}"; host="${host%%:*}"
+    [[ "$host" == *.* ]]                 || return 0   # localhost, a bare name
+    [[ "$host" =~ ^[0-9.]+$ ]]           && return 0   # an IP address
+    printf '%s' "${host%%.*}"
+}
+URL_DB="$(url_db "$ODOO_URL")"
+# What the tape types at a "Database name" prompt. --db wins, then whatever the
+# check auto-detects, then the subdomain. Kept apart from ODOO_DB so that flags
+# mode still films only the flags that were actually asked for.
+DB_NAME="${ODOO_DB:-$URL_DB}"
+
 auth_check() {  # auth_check <db>  -> prints the JSON, exit status is the check's
     ODOO_URL="$ODOO_URL" ODOO_LOGIN="$ODOO_LOGIN" ODOO_SECRET="$ODOO_SECRET" \
     ODOO_DB="${1:-}" python3 "$CRUD_TOOL" auth-check 2>&1
@@ -307,20 +325,32 @@ if [[ "$SKIP_CHECK" -eq 0 && "$DRY_RUN" -eq 0 ]]; then
         if [[ $AUTH_STATUS -eq 0 ]]; then
             DETECTED_DB="$(printf '%s' "$AUTH_OUT" | json_get database)"
             ok "connection works${DETECTED_DB:+ (auto-detected database: $DETECTED_DB)}"
+            [[ -n "$DETECTED_DB" ]] && DB_NAME="${ODOO_DB:-$DETECTED_DB}"
             [[ "$DB_PROMPT" == "auto" ]] && { [[ -n "$DETECTED_DB" ]] && DB_PROMPT="no" || DB_PROMPT="yes"; }
             if [[ -n "$ODOO_DB" && -n "$DETECTED_DB" && "$ODOO_DB" != "$DETECTED_DB" && "$MODE" == "prompts" ]]; then
                 warn "--db $ODOO_DB will never be typed: the feeder auto-detects '$DETECTED_DB' and skips that prompt."
             fi
-        elif [[ -n "$ODOO_DB" ]]; then
-            # Auto-detection failed (localhost / multi-db), so the feeder will
-            # ask — verify the name that the tape is going to type.
-            set +e; AUTH_OUT="$(auth_check "$ODOO_DB")"; AUTH_STATUS=$?; set -e
-            [[ $AUTH_STATUS -eq 0 ]] || die "auth-check failed for database '$ODOO_DB' — fix this before recording:
+        elif [[ -n "$DB_NAME" ]]; then
+            # Auto-detection failed (localhost, multi-db, or a hiccup on a
+            # perfectly good SaaS host), so the feeder will ask — verify the
+            # name the tape is going to type. Without --db that name is the
+            # URL's subdomain, which is why *.odoo.com does not need the flag.
+            set +e; AUTH_OUT="$(auth_check "$DB_NAME")"; AUTH_STATUS=$?; set -e
+            if [[ $AUTH_STATUS -ne 0 ]]; then
+                [[ -n "$ODOO_DB" ]] \
+                    && die "auth-check failed for database '$DB_NAME' — fix this before recording:
 $AUTH_OUT"
-            ok "connection works with database '$ODOO_DB' (not auto-detected, so it will be asked for)"
+                die "auth-check failed, with no database name and with '$DB_NAME' (the URL's
+  subdomain) — so this is the credentials or the host, not the database name.
+  Pass --db only if this database is called something else:
+$AUTH_OUT"
+            fi
+            src="from the URL host"; [[ -n "$ODOO_DB" ]] && src="--db"
+            ok "connection works with database '$DB_NAME' ($src) — not auto-detected, so it will be asked for"
             [[ "$DB_PROMPT" == "auto" ]] && DB_PROMPT="yes"
         else
-            die "auth-check failed — fix this before recording (or pass --db):
+            die "auth-check failed, and this URL implies no database name — fix this
+  before recording (or name the database with --db):
 $AUTH_OUT"
         fi
     else
@@ -457,7 +487,7 @@ TAPE
 
         [[ "$DB_PROMPT" == "yes" ]] && {
             printf '\nWait+Screen /Database name/\nSleep 900ms\n'
-            answer "$ODOO_DB"
+            answer "$DB_NAME"
         }
 
         # Dataset size — gum chooser, small first.
