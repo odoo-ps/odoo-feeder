@@ -150,24 +150,78 @@ fi
 SUDO=""
 if [[ "$PM" != "brew" && "$(id -u)" -ne 0 ]]; then SUDO="sudo"; fi
 
+BIN_DIR="$HOME/.local/bin"
+[[ ":$PATH:" == *":$BIN_DIR:"* ]] || export PATH="$BIN_DIR:$PATH"
+
+# Both vhs and ttyd ship static binaries, so a machine where sudo needs a
+# password (or has no package manager at all) is not a dead end — drop them in
+# ~/.local/bin instead. Same fallback feed.sh uses for gum.
+VHS_VERSION="${VHS_VERSION:-0.11.0}"
+TTYD_VERSION="${TTYD_VERSION:-1.7.7}"
+
+install_vhs_binary() {
+    local os arch tmp bin
+    os="$(uname -s)"; arch="$(uname -m)"
+    case "$arch" in x86_64|amd64) arch="x86_64";; aarch64|arm64) arch="arm64";; *) return 1;; esac
+    [[ "$os" == "Linux" || "$os" == "Darwin" ]] || return 1
+    tmp="$(mktemp -d)"
+    curl -fsSL "https://github.com/charmbracelet/vhs/releases/download/v${VHS_VERSION}/vhs_${VHS_VERSION}_${os}_${arch}.tar.gz" \
+        -o "$tmp/vhs.tgz" 2>/dev/null && tar -xzf "$tmp/vhs.tgz" -C "$tmp" 2>/dev/null || { rm -rf "$tmp"; return 1; }
+    bin="$(find "$tmp" -type f -name vhs | head -n1)"
+    [[ -n "$bin" ]] && mkdir -p "$BIN_DIR" && install -m755 "$bin" "$BIN_DIR/vhs" || { rm -rf "$tmp"; return 1; }
+    rm -rf "$tmp"
+}
+
+# ttyd publishes one static binary per arch, named after `uname -m` itself.
+install_ttyd_binary() {
+    local arch; arch="$(uname -m)"
+    [[ "$(uname -s)" == "Linux" ]] || return 1
+    case "$arch" in x86_64|aarch64|armv7l|i686) ;; *) return 1;; esac
+    mkdir -p "$BIN_DIR"
+    curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.${arch}" \
+        -o "$BIN_DIR/ttyd" 2>/dev/null || return 1
+    chmod +x "$BIN_DIR/ttyd"
+}
+
+pkg_install_recorder() {  # pkg_install_recorder <pkg>...
+    case "$PM" in
+        dnf)  [[ -n "$SUDO" ]] && ! sudo -n true 2>/dev/null && return 1
+              $SUDO dnf install -y "$@" >/dev/null 2>&1 ;;
+        apt)  [[ -n "$SUDO" ]] && ! sudo -n true 2>/dev/null && return 1
+              $SUDO apt-get install -y "$@" >/dev/null 2>&1 ;;
+        brew) brew install "$@" >/dev/null 2>&1 ;;
+        *)    return 1 ;;
+    esac
+}
+
 install_hint() {
     case "$PM" in
         dnf)  printf 'sudo dnf install -y vhs ttyd ffmpeg' ;;
-        apt)  printf 'see https://github.com/charmbracelet/vhs#installation (Charm apt repo), plus: sudo apt install ttyd ffmpeg' ;;
+        apt)  printf 'sudo apt install ttyd ffmpeg, plus vhs from https://github.com/charmbracelet/vhs#installation' ;;
         brew) printf 'brew install vhs ttyd ffmpeg' ;;
         *)    printf 'see https://github.com/charmbracelet/vhs#installation' ;;
     esac
 }
 
+# ensure_recorder_bin <cmd> <package-name> <binary-fallback-fn|-->
+ensure_recorder_bin() {
+    local cmd="$1" pkg="$2" fallback="$3"
+    command -v "$cmd" >/dev/null 2>&1 && { ok "$cmd present"; return 0; }
+    warn "$cmd not found — installing..."
+    if pkg_install_recorder "$pkg" && command -v "$cmd" >/dev/null 2>&1; then
+        ok "$cmd installed ($PM)"; return 0
+    fi
+    if [[ "$fallback" != "--" ]] && "$fallback" && command -v "$cmd" >/dev/null 2>&1; then
+        ok "$cmd installed (static binary → $BIN_DIR)"; return 0
+    fi
+    return 1
+}
+
 step "Checking recording dependencies"
-missing=()
-for c in vhs ttyd ffmpeg; do
-    if command -v "$c" >/dev/null 2>&1; then ok "$c present"; else missing+=("$c"); fi
-done
-if (( ${#missing[@]} )) && [[ "$DRY_RUN" -eq 0 ]]; then
-    warn "missing: ${missing[*]}"
-    die "Install them first:
-   $(install_hint)"
+if [[ "$DRY_RUN" -eq 0 ]]; then
+    ensure_recorder_bin ffmpeg ffmpeg --                 || die "ffmpeg is required. Install it: $(install_hint)"
+    ensure_recorder_bin ttyd   ttyd   install_ttyd_binary || die "ttyd is required (vhs drives it). Install it: $(install_hint)"
+    ensure_recorder_bin vhs    vhs    install_vhs_binary  || die "vhs is required. Install it: $(install_hint)"
 fi
 
 # --------------------------------------------------------------------------- #
