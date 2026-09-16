@@ -264,9 +264,9 @@ ensure_keyring() {
     warn "keyring not found — installing..."
     case "$PM" in
         apt)  $SUDO apt-get update -y >/dev/null 2>&1 || true
-              $SUDO apt-get install -y python3-keyring >/dev/null 2>&1 || true ;;
-        dnf)  $SUDO dnf install -y python3-keyring >/dev/null 2>&1 || true ;;
-        brew) brew install keyring >/dev/null 2>&1 || true ;;
+              $SUDO apt-get install -y python3-keyring || true ;;
+        dnf)  $SUDO dnf install -y python3-keyring || true ;;
+        brew) brew install keyring || true ;;
     esac
     hash -r 2>/dev/null || true
     if ! command -v keyring >/dev/null 2>&1; then
