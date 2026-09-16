@@ -252,6 +252,41 @@ ensure_node() {
     ok "node installed"
 }
 
+# The 'keyring' CLI (from Python's keyring package) reads the OpenRouter API key
+# out of the OS keyring — libsecret on Linux, the Keychain on macOS. Prefer a
+# real package: Debian/Ubuntu and Fedora ship python3-keyring, Homebrew ships
+# `keyring` itself. pip is the last resort and needs two allowances: a PEP 668
+# Python ("externally managed" — every recent distro, and brew's) refuses a plain
+# install, and the CLI lands in the *user* scripts dir, which on macOS is
+# ~/Library/Python/3.x/bin and on no PATH by default.
+ensure_keyring() {
+    command -v keyring >/dev/null 2>&1 && { ok "keyring already present"; return 0; }
+    warn "keyring not found — installing..."
+    case "$PM" in
+        apt)  $SUDO apt-get update -y >/dev/null 2>&1 || true
+              $SUDO apt-get install -y python3-keyring >/dev/null 2>&1 || true ;;
+        dnf)  $SUDO dnf install -y python3-keyring >/dev/null 2>&1 || true ;;
+        brew) brew install keyring >/dev/null 2>&1 || true ;;
+    esac
+    hash -r 2>/dev/null || true
+    if ! command -v keyring >/dev/null 2>&1; then
+        pip3 install --user keyring >/dev/null 2>&1 \
+            || pip3 install --user --break-system-packages keyring >/dev/null 2>&1 || true
+        local user_bin
+        user_bin="$(python3 -m site --user-base 2>/dev/null)/bin"
+        if [[ -d "$user_bin" && ":$PATH:" != *":$user_bin:"* ]]; then
+            export PATH="$user_bin:$PATH"
+        fi
+        hash -r 2>/dev/null || true
+    fi
+    if ! command -v keyring >/dev/null 2>&1; then
+        local hint="pip3 install --user keyring"
+        [[ "$PM" == "brew" ]] && hint="brew install keyring"
+        die "Could not install the 'keyring' CLI automatically. Install it yourself ('$hint') and re-run."
+    fi
+    ok "keyring installed"
+}
+
 # --------------------------------------------------------------------------- #
 # AI CLI provider dispatch — agy (Antigravity), copilot (GitHub Copilot CLI)
 # and claude (Claude Code) are implemented. Unknown providers fail fast,
@@ -303,20 +338,7 @@ ensure_gum                            # optional: nicer prompts, plain fallback
 # --------------------------------------------------------------------------- #
 if [[ -n "$OPENROUTER_MODEL" ]]; then
     step "Checking OpenRouter API key"
-    if command -v keyring >/dev/null 2>&1; then
-        ok "keyring already present"
-    else
-        warn "keyring not found — installing..."
-        case "$PM" in
-            apt)  $SUDO apt-get update -y >/dev/null 2>&1 || true
-                  $SUDO apt-get install -y python3-keyring ;;
-            dnf)  $SUDO dnf install -y python3-keyring ;;
-            *)    pip3 install --user keyring ;;
-        esac
-        command -v keyring >/dev/null 2>&1 \
-            || die "Could not install the 'keyring' CLI automatically. Install it yourself (e.g. 'pip install keyring') and re-run."
-        ok "keyring installed"
-    fi
+    ensure_keyring
     if keyring get "$OPENROUTER_KEYRING_SERVICE" "$OPENROUTER_KEYRING_ACCOUNT" >/dev/null 2>&1; then
         ok "OpenRouter API key already stored"
     elif [[ -t 0 ]]; then

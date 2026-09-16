@@ -66,6 +66,9 @@ as a flag or plaintext env var — store it once in the OS keyring:
 keyring set odoo-feeder openrouter-api-key
 ```
 
+(`feed.sh` installs the `keyring` CLI itself; by hand it is `brew install keyring` on
+macOS, `sudo apt install python3-keyring` on Debian/Ubuntu.)
+
 then run with:
 
 ```bash

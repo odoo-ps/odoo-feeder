@@ -477,7 +477,9 @@ if [[ -n "$OPENROUTER_MODEL" ]]; then
     [[ "$AI_CLI" == "copilot" ]] \
         || die "--openrouter-model / OPENROUTER_MODEL only applies to --ai-cli copilot."
     command -v keyring >/dev/null 2>&1 \
-        || die "The 'keyring' CLI is required to read the OpenRouter API key (pip install keyring), then:
+        || die "The 'keyring' CLI is required to read the OpenRouter API key
+   (macOS: 'brew install keyring'; Debian/Ubuntu: 'sudo apt install python3-keyring';
+    otherwise 'pip3 install --user keyring'), then:
    keyring set $OPENROUTER_KEYRING_SERVICE $OPENROUTER_KEYRING_ACCOUNT"
     OPENROUTER_API_KEY="$(keyring get "$OPENROUTER_KEYRING_SERVICE" "$OPENROUTER_KEYRING_ACCOUNT" 2>/dev/null)" \
         || die "No OpenRouter API key found in the OS keyring. Store it once with:
